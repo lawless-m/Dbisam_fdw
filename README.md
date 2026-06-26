@@ -39,4 +39,7 @@ The extension crate needs the pgrx toolchain — see
   builds + passes 46 tests. MrsFlow rewired onto it (its in-tree module → a thin
   adapter); one source of truth.
 - **`dbisam-sql` renderer** — foldable subset + all four quirks, 14 tests green.
-- **`dbisam_fdw`** — skeleton; the Wrappers trait impl and type mapping are next.
+- **`dbisam_fdw`** — `ForeignDataWrapper` implemented; compiles against system
+  PG15 (pgrx 0.16.1 / supabase-wrappers 0.1.28) and `cargo pgrx schema` emits a
+  valid extension. Scan/projection/filter/limit pushdown + import wired; live
+  end-to-end scan against a real server is the remaining step.

@@ -12,23 +12,29 @@ description = "Read-only PostgreSQL Foreign Data Wrapper for DBISAM 4, over the 
 [lib]
 crate-type = ["cdylib", "lib"]
 
+# Required by `cargo pgrx schema` — the helper binary that emits the extension
+# SQL. cargo-pgrx looks for a bin named `pgrx_embed_<crate>`.
+[[bin]]
+name = "pgrx_embed_dbisam_fdw"
+path = "./src/bin/pgrx_embed.rs"
+doc = false
+
 [features]
-# pgrx pins the extension to one Postgres major version per build. Select one,
-# e.g. `cargo pgrx run pg16`. Reconcile the exact pg list with the installed
-# pgrx/supabase-wrappers versions at bootstrap.
-default = ["pg16"]
+# pgrx pins the extension to one Postgres major version per build. This box has
+# system PostgreSQL 15 (postgresql-server-dev-15), so pg15 is the default and
+# the version `cargo pgrx init --pg15 $(which pg_config)` targets.
+default = ["pg15"]
 pg13 = ["pgrx/pg13", "supabase-wrappers/pg13"]
 pg14 = ["pgrx/pg14", "supabase-wrappers/pg14"]
 pg15 = ["pgrx/pg15", "supabase-wrappers/pg15"]
 pg16 = ["pgrx/pg16", "supabase-wrappers/pg16"]
 pg17 = ["pgrx/pg17", "supabase-wrappers/pg17"]
-pg_test = []
+pg_test = ["supabase-wrappers/pg_test"]
 
 [dependencies]
-# Pin these to the versions `cargo pgrx init` installs; the numbers below are
-# a starting point, not a guarantee — supabase-wrappers tracks a specific pgrx.
-pgrx = "=0.12.9"
-supabase-wrappers = "0.1"
+# supabase-wrappers 0.1.28 pins pgrx =0.16.1; cargo-pgrx must match exactly.
+pgrx = "=0.16.1"
+supabase-wrappers = "=0.1.28"
 
 # The pushdown renderer (this repo) and the protocol client (sibling repo).
 dbisam-sql = { path = "../dbisam-sql" }
@@ -37,7 +43,7 @@ exportmaster = { path = "../../exportmaster" }
 arrow = { version = "53", default-features = false }
 
 [dev-dependencies]
-pgrx-tests = "=0.12.9"
+pgrx-tests = "=0.16.1"
 
 [profile.dev]
 panic = "unwind"

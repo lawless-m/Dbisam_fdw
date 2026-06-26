@@ -1,41 +1,74 @@
-//! DBISAM → PostgreSQL type mapping and value conversion —
-//! `proj_init/05-type-mapping.md`.
+//! DBISAM/Arrow → PostgreSQL type mapping — `proj_init/05-type-mapping.md`.
 //!
-//! In milestone 1 this is a **correctness** requirement, not a convenience:
-//! data exits Postgres through Npgsql to PowerBI, which renders coercion
-//! surprises silently. The fidelity rules to honour:
+//! `exportmaster` decodes DBISAM rows into Arrow arrays; this module maps those
+//! into Wrappers [`Cell`]s for `iter_scan`, and into PG type names for
+//! `IMPORT FOREIGN SCHEMA`. The Arrow types `exportmaster` actually emits
+//! (see its `row.rs`) are: Utf8, Int32, Int64, Float64, Boolean, Date32,
+//! Timestamp(µs), Binary — plus Int64 for DBISAM Time (a current exportmaster
+//! quirk).
 //!
-//! - **Lossless numeric** — DBISAM BCD / currency → PG `numeric` with full
-//!   precision/scale, never a float that drops digits.
-//! - **Text** — already transcoded Win-1252 → UTF-8 at the protocol boundary
-//!   by `exportmaster` (`decode_dbisam_text`), so PG sees clean UTF-8.
-//! - **Dates/times** — `date` / `time` / `timestamp`; verify round-trip
-//!   through Npgsql, not just `psql`.
-//! - **Null handling** — distinguish real NULLs from decode failures. Default
-//!   strict (raise); offer an opt-in `lenient_decode` that turns failures into
-//!   NULLs with a per-batch summary (mirrors Delilah).
-//!
-//! Mapping table skeleton (confirm tags against `exportmaster::schema` +
-//! Derek before relying on it):
-//!
-//! | DBISAM            | PostgreSQL              |
-//! |-------------------|-------------------------|
-//! | int family        | int2 / int4 / int8      |
-//! | BCD / currency    | numeric (lossless)      |
-//! | float / double    | float4 / float8         |
-//! | boolean           | bool                    |
-//! | string / char     | text / varchar(n)       |
-//! | memo              | text  (per-row OpenBlob)|
-//! | blob / graphic    | bytea (per-row OpenBlob)|
-//! | date/time/datetime| date / time / timestamp |
-//!
-//! Two jobs live here:
-//! 1. `schema_type(col: &exportmaster::Column) -> PgType` — for
-//!    `IMPORT FOREIGN SCHEMA` DDL and column declarations.
-//! 2. `cell_to_datum(cell: &exportmaster::CellValue) -> Cell` — per-value
-//!    conversion during `iter_scan`.
+//! KNOWN FIDELITY GAPS to close against doc 05 (both originate in exportmaster,
+//! not here):
+//!   - DBISAM Currency/BCD currently decode to Float64 → mapped to `double
+//!     precision`. Doc 05 requires lossless `numeric`. Fix in exportmaster
+//!     (emit Decimal128), then map to `numeric` here.
+//!   - DBISAM Time decodes to Int64 → surfaces as `bigint`, not `time`.
 
-// TODO: implement once the Wrappers `Cell` enum and the pg type OIDs are in
-// scope (needs the pgrx build). The Arrow `RecordBatch` exportmaster returns
-// already carries an Arrow schema, so much of (1) can be derived from there;
-// (2) reads the typed Arrow columns / CellValues.
+use arrow::array::{
+    Array, ArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array, Int64Array, StringArray,
+    TimestampMicrosecondArray,
+};
+use arrow::datatypes::DataType;
+use pgrx::datum::{Date, Timestamp};
+use supabase_wrappers::prelude::Cell;
+
+/// Days between the Unix epoch (Arrow Date32 origin, 1970-01-01) and the
+/// Postgres epoch (2000-01-01). Arrow stores days since 1970; pgrx `Date`
+/// counts from 2000.
+const UNIX_TO_PG_EPOCH_DAYS: i32 = 10_957;
+/// Microseconds between the Unix and Postgres epochs.
+const UNIX_TO_PG_EPOCH_MICROS: i64 = 10_957 * 86_400 * 1_000_000;
+
+/// One value from an Arrow column at `row`, as a Wrappers cell (`None` = NULL).
+pub fn array_cell(array: &ArrayRef, row: usize) -> Option<Cell> {
+    if array.is_null(row) {
+        return None;
+    }
+    match array.data_type() {
+        DataType::Utf8 => downcast::<StringArray>(array).map(|a| Cell::String(a.value(row).to_string())),
+        DataType::Boolean => downcast::<BooleanArray>(array).map(|a| Cell::Bool(a.value(row))),
+        DataType::Int32 => downcast::<Int32Array>(array).map(|a| Cell::I32(a.value(row))),
+        DataType::Int64 => downcast::<Int64Array>(array).map(|a| Cell::I64(a.value(row))),
+        DataType::Float64 => downcast::<Float64Array>(array).map(|a| Cell::F64(a.value(row))),
+        DataType::Date32 => downcast::<Date32Array>(array).and_then(|a| {
+            // Arrow days-since-1970 → pgrx Date (days-since-2000).
+            Date::try_from(a.value(row) - UNIX_TO_PG_EPOCH_DAYS).ok().map(Cell::Date)
+        }),
+        DataType::Timestamp(_, _) => downcast::<TimestampMicrosecondArray>(array).and_then(|a| {
+            Timestamp::try_from(a.value(row) - UNIX_TO_PG_EPOCH_MICROS).ok().map(Cell::Timestamp)
+        }),
+        // Unhandled types fall back to NULL rather than a wrong value. Surfacing
+        // these belongs in the strict/lenient decode policy (doc 05) — TODO.
+        _ => None,
+    }
+}
+
+fn downcast<T: 'static>(array: &ArrayRef) -> Option<&T> {
+    array.as_any().downcast_ref::<T>()
+}
+
+/// PostgreSQL type name for an Arrow column type, used to emit
+/// `CREATE FOREIGN TABLE` DDL during `IMPORT FOREIGN SCHEMA`.
+pub fn arrow_pg_type(dt: &DataType) -> &'static str {
+    match dt {
+        DataType::Utf8 => "text",
+        DataType::Boolean => "boolean",
+        DataType::Int32 => "integer",
+        DataType::Int64 => "bigint",
+        DataType::Float64 => "double precision", // see fidelity gap: currency → numeric
+        DataType::Date32 => "date",
+        DataType::Timestamp(_, _) => "timestamp",
+        DataType::Binary | DataType::LargeBinary => "bytea",
+        _ => "text",
+    }
+}

@@ -8,10 +8,11 @@
 [workspace]
 resolver = "2"
 members = ["dbisam-sql"]
-# `dbisam_fdw` (the pgrx extension) is excluded until the pgrx toolchain is
-# bootstrapped (`cargo install cargo-pgrx`), so plain `cargo test` on the
-# renderer never has to resolve the heavy pgrx dependency graph. Move it into
-# `members` once `cargo pgrx init` has run. See dbisam_fdw/README.md.
+# `dbisam_fdw` (the pgrx extension) is kept out of the workspace so plain
+# `cargo test` on the renderer never resolves/builds the heavy pgrx graph or the
+# cdylib (which needs a pg feature + pg_config). It builds on its own from
+# dbisam_fdw/ — `cargo build --features pg15` or `cargo pgrx …`. pgrx is already
+# bootstrapped on this machine; see dbisam_fdw/README.md.
 exclude = ["dbisam_fdw"]
 
 [workspace.package]
