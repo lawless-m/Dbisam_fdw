@@ -61,3 +61,20 @@ broker-vs-serialise decision depends on measured DirectQuery concurrency
 against the real server's login tolerance; treat it as a sized experiment
 early, because it shapes whether the milestone-1 demo survives a real report
 page rather than a single-visual preview.
+
+## Live finding (2026-06) — "per-backend reuse" isn't free either
+
+Empirically, the current `exportmaster` client **cannot run two queries on one
+session**: after a completed query, a second `PrepareStatement` fails with
+server reqcode `0x2C2C`, despite the client's close-cursor / reset / release
+cleanup. So today *every query is a fresh login* — even within a single backend.
+This means:
+
+- The FDW already logs in per scan (correct, no regression).
+- "Per-backend session reuse" (above) is **not** a cheap given — it needs
+  protocol work to make a session reusable across queries (a fuller reset, or
+  understanding what `0x2C2C` wants). Until then the only lever against the
+  login-storm constraint is the broker / serialiser, which raises its priority.
+
+This was found while testing memo resolution; see `08-q1-resolution.md` and the
+`exportmaster` `find_memo` example.

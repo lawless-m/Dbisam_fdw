@@ -15,11 +15,11 @@
 //!   - DBISAM Time decodes to Int64 → surfaces as `bigint`, not `time`.
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, Date32Array, Float64Array, Int32Array, Int64Array, StringArray,
-    TimestampMicrosecondArray,
+    Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Float64Array, Int32Array, Int64Array,
+    StringArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::DataType;
-use pgrx::datum::{Date, Timestamp};
+use pgrx::datum::{Date, IntoDatum, Timestamp};
 use supabase_wrappers::prelude::Cell;
 
 /// Days between the Unix epoch (Arrow Date32 origin, 1970-01-01) and the
@@ -47,8 +47,16 @@ pub fn array_cell(array: &ArrayRef, row: usize) -> Option<Cell> {
         DataType::Timestamp(_, _) => downcast::<TimestampMicrosecondArray>(array).and_then(|a| {
             Timestamp::try_from(a.value(row) - UNIX_TO_PG_EPOCH_MICROS).ok().map(Cell::Timestamp)
         }),
-        // Unhandled types fall back to NULL rather than a wrong value. Surfacing
-        // these belongs in the strict/lenient decode policy (doc 05) — TODO.
+        // Blob / Memo / Graphic columns: exportmaster resolves the handle to the
+        // raw bytes (Arrow Binary), which we surface as bytea. NOTE: doc 05 wants
+        // *Memo* mapped to text (Win-1252 → UTF-8), but the Arrow schema can't
+        // tell Memo from a true binary blob — both are Binary. Distinguishing
+        // them needs exportmaster to expose the DBISAM FieldType per column;
+        // until then, bytea is the lossless choice and the user can
+        // `convert_from(col, 'WIN1252')` for memo text.
+        DataType::Binary => downcast::<BinaryArray>(array)
+            .and_then(|a| a.value(row).into_datum())
+            .map(|d| Cell::Bytea(d.cast_mut_ptr())),
         _ => None,
     }
 }

@@ -69,8 +69,24 @@ The `ForeignDataWrapper` trait is implemented and **compiles against PG15**;
   Wrappers-shaped form of doc 02's read-only contract — Wrappers' modify
   methods default to silent no-ops, so absence isn't enough here).
 
-Not yet done / known gaps: live end-to-end scan against a real DBISAM server
-(needs credentials); per-backend session reuse + streaming (`06`); pushing
-`IS NULL` and date/time predicates (need the DBISAM `#…#` literal pinned vs
-Dibdog); currency→`numeric` fidelity (an exportmaster decode gap, see
-`typemap.rs`).
+Verified live: scalar scans (`MikeTest`) and **memo/blob resolution**
+(`ARCVCFG.ACMemo`, via `OpenBlob`/`FreeBlob`) both return correct data through
+PG → dbisam_fdw → exportmaster → DBISAM.
+
+Known gaps:
+- **Memo → bytea, not text.** Memo columns surface as `bytea` (the resolved
+  blob bytes); doc 05 wants `text` (Win-1252→UTF-8). The Arrow schema can't tell
+  Memo from a binary Blob/Graphic — both are Binary — so this needs exportmaster
+  to expose the DBISAM `FieldType` per column; then the FDW maps Memo→text,
+  Blob/Graphic→bytea. For now: `convert_from(col, 'WIN1252')` in SQL.
+- **PK auto-injection.** Blob resolution derives each row's `OpenBlob` slot from
+  `columns[0]`, treating it as the PK. So a memo/blob column must be projected
+  *with the PK as the first column*; `SELECT <memo>` alone breaks resolution.
+  The FDW must auto-inject the PK into the projection (doc 05) — not yet done.
+- **Session reuse fails.** Sequential queries on one Exportmaster session error
+  (2nd `PrepareStatement` → `0x2C2C`); each query needs a fresh login. Sharpens
+  the broker decision (`06`, Q4) — per-backend reuse needs protocol work.
+- Pushing `IS NULL` and date/time predicates (need the DBISAM `#…#` literal
+  pinned vs Dibdog); currency→`numeric` fidelity (an exportmaster decode gap).
+- Live end-to-end is via the pgrx-managed PG15; streaming (vs materialising the
+  whole batch in `begin_scan`) is a later refinement.
