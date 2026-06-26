@@ -27,11 +27,30 @@ cargo pgrx run pg15                                 # install into a throwaway P
 
 ```sql
 CREATE EXTENSION dbisam_fdw;
+
+-- The extension ships the handler/validator functions; declare the wrapper:
+CREATE FOREIGN DATA WRAPPER dbisam_fdw
+  HANDLER dbisam_fdw_handler VALIDATOR dbisam_fdw_validator;
+
+-- Credentials go in the SERVER options. supabase-wrappers 0.1.28 exposes only
+-- server options to the FDW (its ForeignServer has no user-mapping field), so
+-- USER MAPPING options are NOT seen by the wrapper. Reading per-user mappings
+-- would need a manual pg_sys catalog lookup — a future enhancement.
 CREATE SERVER em FOREIGN DATA WRAPPER dbisam_fdw
-  OPTIONS (host '...', catalog 'NISAINT_CS');
-CREATE USER MAPPING FOR CURRENT_USER SERVER em OPTIONS (user '...', password '...');
-IMPORT FOREIGN SCHEMA dbisam FROM SERVER em INTO public;
+  OPTIONS (host '...', port '12005', catalog 'NISAINT_CS',
+           user '...', password '...');
+
+-- One per table (or use IMPORT FOREIGN SCHEMA). Quote columns to preserve the
+-- DBISAM column-name case:
+CREATE FOREIGN TABLE miketest ("Mike1" text, "Mike2" text)
+  SERVER em OPTIONS (table 'MikeTest');
+
+SELECT * FROM miketest;
 ```
+
+Verified end-to-end against a live DBISAM server (PG15 → dbisam_fdw →
+exportmaster → DBISAM): `SELECT * FROM miketest` returned all rows, matching a
+direct protocol-level query.
 
 ## Status
 
