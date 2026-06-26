@@ -1,0 +1,23 @@
+# Virtual workspace for dbisam_fdw.
+#
+#   dbisam-sql   — quals → DBISAM SQL renderer (plain lib; no pgrx, unit-tested).
+#   dbisam_fdw   — the pgrx + Supabase Wrappers extension (the .so).
+#
+# The protocol layer (`exportmaster`) is an external sibling crate, depended on
+# by path today; see ../exportmaster and proj_init/08-q1-resolution.md.
+[workspace]
+resolver = "2"
+members = ["dbisam-sql"]
+# `dbisam_fdw` (the pgrx extension) is excluded until the pgrx toolchain is
+# bootstrapped (`cargo install cargo-pgrx`), so plain `cargo test` on the
+# renderer never has to resolve the heavy pgrx dependency graph. Move it into
+# `members` once `cargo pgrx init` has run. See dbisam_fdw/README.md.
+exclude = ["dbisam_fdw"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "warn"

@@ -1,0 +1,5 @@
+comment = 'Read-only Foreign Data Wrapper for DBISAM 4 over the native Exportmaster protocol'
+default_version = '0.1.0'
+module_pathname = '$libdir/dbisam_fdw'
+relocatable = false
+superuser = false

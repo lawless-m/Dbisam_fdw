@@ -1,0 +1,48 @@
+[package]
+name = "dbisam_fdw"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Read-only PostgreSQL Foreign Data Wrapper for DBISAM 4, over the native Exportmaster TCP protocol."
+
+# NOTE: standalone (not a member of the parent virtual workspace) until the
+# pgrx toolchain is bootstrapped — see README.md. This keeps `cargo test` on
+# the dbisam-sql renderer free of the pgrx dependency graph.
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# pgrx pins the extension to one Postgres major version per build. Select one,
+# e.g. `cargo pgrx run pg16`. Reconcile the exact pg list with the installed
+# pgrx/supabase-wrappers versions at bootstrap.
+default = ["pg16"]
+pg13 = ["pgrx/pg13", "supabase-wrappers/pg13"]
+pg14 = ["pgrx/pg14", "supabase-wrappers/pg14"]
+pg15 = ["pgrx/pg15", "supabase-wrappers/pg15"]
+pg16 = ["pgrx/pg16", "supabase-wrappers/pg16"]
+pg17 = ["pgrx/pg17", "supabase-wrappers/pg17"]
+pg_test = []
+
+[dependencies]
+# Pin these to the versions `cargo pgrx init` installs; the numbers below are
+# a starting point, not a guarantee — supabase-wrappers tracks a specific pgrx.
+pgrx = "=0.12.9"
+supabase-wrappers = "0.1"
+
+# The pushdown renderer (this repo) and the protocol client (sibling repo).
+dbisam-sql = { path = "../dbisam-sql" }
+exportmaster = { path = "../../exportmaster" }
+# To handle the RecordBatch exportmaster hands back. Match exportmaster's pin.
+arrow = { version = "53", default-features = false }
+
+[dev-dependencies]
+pgrx-tests = "=0.12.9"
+
+[profile.dev]
+panic = "unwind"
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1

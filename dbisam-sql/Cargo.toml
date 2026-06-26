@@ -1,0 +1,11 @@
+[package]
+name = "dbisam-sql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Renders a foldable predicate subset into DBISAM 4 SQL WHERE clauses, with the four DBISAM dialect-quirk compensations. The pushdown contract for dbisam_fdw."
+
+[lints]
+workspace = true
+
+[dependencies]
