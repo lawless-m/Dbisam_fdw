@@ -144,7 +144,7 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
                     names.push(c.name.as_str());
                 }
             }
-            names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ")
+            names.iter().map(|n| dbisam_sql::quote_ident(n)).collect::<Vec<_>>().join(", ")
         };
 
         // Filter: render the foldable subset; the rest is rechecked by Postgres.
@@ -155,7 +155,7 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
         // (04 §"Limit edge case").
         let all_pushed = preds.iter().all(|p| p.render().is_some());
 
-        let mut sql = format!("SELECT {projection} FROM \"{table}\"");
+        let mut sql = format!("SELECT {projection} FROM {}", dbisam_sql::quote_ident(table));
         if let Some(w) = &where_clause {
             sql.push_str(" WHERE ");
             sql.push_str(w);

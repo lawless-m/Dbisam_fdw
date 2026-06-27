@@ -34,6 +34,21 @@
 //!   falls back, because pushing a subset of disjuncts would wrongly narrow
 //!   the result. Correctness over cleverness.
 
+/// Quote a column/identifier for DBISAM SQL: simple identifiers go bare; names
+/// that aren't `[A-Za-z_][A-Za-z0-9_]*` are double-quoted with embedded `"`
+/// doubled. Matches the DBISAM DCG's `gen_ident_atom` (both forms verified live
+/// in MrsFlow's renderer).
+pub fn quote_ident(name: &str) -> String {
+    let bare = !name.is_empty()
+        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if bare {
+        name.to_string()
+    } else {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+}
+
 /// A scalar literal appearing on the value side of a predicate.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Scalar {
@@ -83,8 +98,8 @@ pub enum ColExpr {
 impl ColExpr {
     fn render(&self) -> String {
         match self {
-            ColExpr::Col(c) => c.clone(),
-            ColExpr::Left(c, n) => format!("LEFT({c}, {n})"),
+            ColExpr::Col(c) => quote_ident(c),
+            ColExpr::Left(c, n) => format!("LEFT({}, {n})", quote_ident(c)),
         }
     }
 
@@ -149,7 +164,7 @@ impl Pred {
                 let base = format!("{} {} {}", left.render(), op.sql(), value.render());
                 // Quirk #2: `<>` lets NULL rows through on DBISAM.
                 if *op == CmpOp::Ne {
-                    Some(format!("({base} AND {} IS NOT NULL)", left.column()))
+                    Some(format!("({base} AND {} IS NOT NULL)", quote_ident(left.column())))
                 } else {
                     Some(base)
                 }
@@ -163,12 +178,13 @@ impl Pred {
                 let base = format!("{} {} ({})", col.render(), kw, list);
                 // Quirk #2: NOT IN includes NULLs, same as `<>`.
                 if *negated {
-                    Some(format!("({base} AND {} IS NOT NULL)", col.column()))
+                    Some(format!("({base} AND {} IS NOT NULL)", quote_ident(col.column())))
                 } else {
                     Some(base)
                 }
             }
             Pred::IsNull { col, negated } => {
+                let col = quote_ident(col);
                 Some(if *negated {
                     format!("{col} IS NOT NULL")
                 } else {
@@ -176,7 +192,7 @@ impl Pred {
                 })
             }
             Pred::LikePrefix { col, prefix } => {
-                Some(format!("{col} LIKE '{}%'", prefix.replace('\'', "''")))
+                Some(format!("{} LIKE '{}%'", quote_ident(col), prefix.replace('\'', "''")))
             }
             Pred::And(children) => {
                 // Push the foldable conjuncts; Postgres rechecks the rest.
@@ -286,6 +302,25 @@ mod tests {
     fn like_is_prefix_only() {
         let p = Pred::LikePrefix { col: "code".into(), prefix: "AB".into() };
         assert_eq!(p.render().unwrap(), "code LIKE 'AB%'");
+    }
+
+    #[test]
+    fn odd_identifiers_are_double_quoted() {
+        // space → needs quoting
+        let p = Pred::IsNull { col: "weird name".into(), negated: false };
+        assert_eq!(p.render().unwrap(), "\"weird name\" IS NULL");
+        // leading digit → needs quoting
+        let p = Pred::Compare { left: col("2col"), op: CmpOp::Eq, value: Scalar::Int(1) };
+        assert_eq!(p.render().unwrap(), "\"2col\" = 1");
+        // embedded double-quote is doubled; also exercises the <> guard
+        let p = Pred::Compare {
+            left: col("a\"b"),
+            op: CmpOp::Ne,
+            value: Scalar::Int(1),
+        };
+        assert_eq!(p.render().unwrap(), "(\"a\"\"b\" <> 1 AND \"a\"\"b\" IS NOT NULL)");
+        // simple names stay bare (matches Dibdog's gen_ident_atom)
+        assert_eq!(quote_ident("PRICE"), "PRICE");
     }
 
     #[test]

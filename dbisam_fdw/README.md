@@ -107,10 +107,12 @@ than PG wants (a subset) — a superset is always corrected by the recheck.
 
 ## Known gaps
 
-- **WHERE-clause identifier quoting.** The renderer emits column names bare in
-  predicates (`WHERE PRICE IS NULL`) while the projection quotes them. Fine for
-  simple names; a reserved/odd column name needs quoting in `dbisam_sql`'s
-  `ColExpr`/`IsNull`/`LikePrefix` renderers.
+- **Reserved-word column names.** All identifier emission (projection, table,
+  and every predicate) now flows through one `dbisam_sql::quote_ident` that
+  matches Dibdog's `gen_ident_atom`: simple names bare, character-odd names
+  (spaces, leading digit, embedded `"`) double-quoted. Like the oracle, it does
+  *not* quote reserved words used as column names — closing that means teaching
+  Dibdog (and then both renderers) the keyword list.
 - **Session reuse fails.** Sequential queries on one Exportmaster session error
   (2nd `PrepareStatement` → `0x2C2C`); each query needs a fresh login. Sharpens
   the broker decision (`06`, Q4) — per-backend reuse needs protocol work.
