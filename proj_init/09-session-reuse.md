@@ -132,6 +132,12 @@ per query and only queues the burst; the warm-socket broker removes the connect
 storm at the root. Either way, FDW backends should borrow from the broker rather
 than `connect_and_login` per scan.
 
+Note `reauth` is the **broker's** per-query step over its warm sockets — in the
+out-of-process model an FDW backend holds no DBISAM `Client` of its own (it sends
+the query to the broker), so there is **no separate "wire `reauth` into the FDW"
+task**: per-backend socket reuse folds into the broker rather than being built
+standalone in the FDW first.
+
 **Interim (before the broker exists):** the FDW's one-`connect_and_login`-per-scan
 is correct; just cap how many PG backends hit DBISAM at once (keep the
 On-Premises Gateway / PG connection pool ≤ ~4 to DBISAM-backed work) to stay
