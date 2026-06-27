@@ -60,13 +60,21 @@ FDW reuse work). **Interim for milestone 1:** keep concurrent PG→DBISAM backen
 ≤ ~4 (gateway/PG pool); the FDW's connect-per-scan is fine. Revisit the broker
 only if a real DirectQuery page shows it's needed.
 
-## Q5 — Aggregate pushdown: when does phase 2 start?
+## Q5 — Aggregate pushdown: when does phase 2 start? — MEASURED: NOT THE FIX
 
-Single-table `GROUP BY` pushdown is deferred out of milestone 1 (doc 02). The
-trigger to start it is evidence that pulling filtered tables up for PG to
-aggregate is too slow for real visuals — i.e. measure it on milestone-1
-reports before building it. May require dropping from Wrappers to raw pgrx for
-`GetForeignUpperPaths` (doc 03). Joins still never go down.
+Measured live (`11-aggregate-perf.md`): a `GROUP BY` over `Analysis` (4.2M rows)
+takes **~96 s pushed down vs ~85 s pulled up** — a wash, because both are
+dominated by a **DBISAM full scan** (only 4 indexes/table → non-indexed
+aggregates always full-scan). Aggregate pushdown saves wire transfer (1,138 vs
+4.2M rows) and PG memory, but **not latency** — it does not make big aggregates
+interactive, so it is *not* the answer to slow visuals.
+
+Stays deferred, with the reasoning changed: the real rule is **freshness-vs-size**
+— route big analytics to the daily Parquet dump (DuckDB does this `GROUP BY` in
+<1 s, columnar), and reserve the live FDW for small/selective/recent queries that
+hit an index or a tight filter. Build aggregate pushdown only if a *specific*
+deployment is wire-bound (slow WAN) or PG-memory-bound — re-evaluate then, not as
+a default. Joins still never go down.
 
 ## Settled — do not reopen
 
