@@ -169,6 +169,10 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
             }
         }
 
+        // The exact DBISAM SQL we push (projection + foldable WHERE + TOP).
+        // Visible with `SET client_min_messages = 'debug1'`.
+        pgrx::debug1!("dbisam_fdw push: {sql}");
+
         let mut client = Client::connect_and_login(&self.opts)?;
         let batch = client.query_to_table(&sql)?;
         self.batch = Some(batch);

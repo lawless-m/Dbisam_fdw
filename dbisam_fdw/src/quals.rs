@@ -20,6 +20,20 @@ fn qual_to_pred(q: &Qual) -> Pred {
     }
     let field = q.field.clone();
 
+    // IS NULL / IS NOT NULL — Wrappers encodes these as operator "is"/"is not"
+    // with the sentinel value Cell::String("null"). DBISAM's IS [NOT] NULL is
+    // ANSI-safe (doc 04 quirk #4), so it pushes directly.
+    if q.operator == "is" || q.operator == "is not" {
+        if let Value::Cell(Cell::String(s)) = &q.value {
+            if s == "null" {
+                return Pred::IsNull { col: field, negated: q.operator == "is not" };
+            }
+        }
+        // "is"/"is not" with a non-null value is a BoolTest (col IS TRUE/FALSE)
+        // — 3-valued logic; leave it to Postgres.
+        return Pred::Unsupported;
+    }
+
     match &q.value {
         // `col = ANY(array)` → IN ; `col <> ALL(array)` → NOT IN.
         Value::Array(cells) => {
@@ -75,6 +89,27 @@ fn cell_to_scalar(c: &Cell) -> Option<Scalar> {
         Cell::I64(n) => Scalar::Int(*n),
         Cell::F32(n) => Scalar::Float(*n as f64),
         Cell::F64(n) => Scalar::Float(*n),
+        Cell::Date(dt) => Scalar::Date {
+            y: dt.year(),
+            m: dt.month() as u32,
+            d: dt.day() as u32,
+        },
+        Cell::Timestamp(ts) => {
+            // Only push whole-second timestamps so the 'YYYY-MM-DD HH:MM:SS'
+            // literal is exact, not a truncation of a fractional second.
+            let sec = ts.second();
+            if sec.fract() != 0.0 {
+                return None;
+            }
+            Scalar::Timestamp {
+                y: ts.year(),
+                mo: ts.month() as u32,
+                d: ts.day() as u32,
+                h: ts.hour() as u32,
+                mi: ts.minute() as u32,
+                s: sec as u32,
+            }
+        }
         _ => return None,
     })
 }

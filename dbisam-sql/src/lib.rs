@@ -35,17 +35,20 @@
 //!   the result. Correctness over cleverness.
 
 /// A scalar literal appearing on the value side of a predicate.
-///
-/// Dates/times are intentionally absent: DBISAM's date literal syntax
-/// (`#...#`) must be pinned against Dibdog/Derek before we render it, and a
-/// wrong date literal returns wrong data, not a slow query. Until then, date
-/// predicates arrive as [`Pred::Unsupported`] and Postgres handles them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Scalar {
     Text(String),
     Int(i64),
     Float(f64),
     Bool(bool),
+    /// A date. DBISAM has no `#…#` or ANSI `DATE '…'` literal — a quoted
+    /// `'YYYY-MM-DD'` string implicitly casts to date in a comparison (verified
+    /// live in MrsFlow's renderer against Exportmaster).
+    Date { y: i32, m: u32, d: u32 },
+    /// A timestamp, rendered `'YYYY-MM-DD HH:MM:SS'` (whole seconds — the
+    /// adapter only emits this when the value has no fractional second, so the
+    /// literal is exact, not truncated).
+    Timestamp { y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32 },
 }
 
 impl Scalar {
@@ -58,6 +61,10 @@ impl Scalar {
             // DBISAM accepts TRUE/FALSE keyword literals for boolean columns.
             // TODO(dibdog): confirm vs 0/1 before widening boolean pushdown.
             Scalar::Bool(b) => if *b { "TRUE".into() } else { "FALSE".into() },
+            Scalar::Date { y, m, d } => format!("'{y:04}-{m:02}-{d:02}'"),
+            Scalar::Timestamp { y, mo, d, h, mi, s } => {
+                format!("'{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}'")
+            }
         }
     }
 }
@@ -329,6 +336,36 @@ mod tests {
             Pred::Unsupported,
         ]);
         assert_eq!(partial.render(), None);
+    }
+
+    #[test]
+    fn date_renders_as_quoted_string() {
+        let p = Pred::Compare {
+            left: col("d"),
+            op: CmpOp::Ge,
+            value: Scalar::Date { y: 2024, m: 1, d: 5 },
+        };
+        assert_eq!(p.render().unwrap(), "d >= '2024-01-05'");
+    }
+
+    #[test]
+    fn timestamp_renders_with_time() {
+        let p = Pred::Compare {
+            left: col("ts"),
+            op: CmpOp::Lt,
+            value: Scalar::Timestamp { y: 2024, mo: 12, d: 31, h: 9, mi: 8, s: 7 },
+        };
+        assert_eq!(p.render().unwrap(), "ts < '2024-12-31 09:08:07'");
+    }
+
+    #[test]
+    fn date_ne_keeps_null_guard() {
+        let p = Pred::Compare {
+            left: col("d"),
+            op: CmpOp::Ne,
+            value: Scalar::Date { y: 2024, m: 6, d: 27 },
+        };
+        assert_eq!(p.render().unwrap(), "(d <> '2024-06-27' AND d IS NOT NULL)");
     }
 
     #[test]
