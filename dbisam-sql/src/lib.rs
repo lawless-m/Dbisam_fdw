@@ -35,19 +35,42 @@
 //!   the result. Correctness over cleverness.
 
 /// Quote a column/identifier for DBISAM SQL: simple identifiers go bare; names
-/// that aren't `[A-Za-z_][A-Za-z0-9_]*` are double-quoted with embedded `"`
-/// doubled. Matches the DBISAM DCG's `gen_ident_atom` (both forms verified live
-/// in MrsFlow's renderer).
+/// that aren't `[A-Za-z_][A-Za-z0-9_]*`, **or that collide with a DBISAM
+/// reserved word**, are double-quoted with embedded `"` doubled. Matches the
+/// DBISAM DCG's `gen_ident_atom` (both forms verified live in MrsFlow's
+/// renderer), plus the reserved-word guard the grammar's keyword set implies.
 pub fn quote_ident(name: &str) -> String {
-    let bare = !name.is_empty()
+    let char_ok = !name.is_empty()
         && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    if bare {
+    if char_ok && !is_reserved(name) {
         name.to_string()
     } else {
         format!("\"{}\"", name.replace('"', "\"\""))
     }
 }
+
+/// True if `name` (case-insensitively) is a DBISAM SQL reserved word.
+fn is_reserved(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    RESERVED.iter().any(|k| *k == upper)
+}
+
+/// DBISAM SQL reserved words, sourced from Dibdog's `keyword//` terminals
+/// (`dbisam-dcg-project/grammar/dcg.pl`). A column named like one of these is
+/// character-valid as a bare identifier but must be double-quoted to parse.
+const RESERVED: &[&str] = &[
+    "ADD", "ALL", "ALTER", "AND", "AS", "ASC", "BETWEEN", "BLOB", "BOOLEAN", "BOTH", "BY", "CASE",
+    "CAST", "CHAR", "COMMIT", "CONCAT", "CREATE", "DATE", "DATETIME", "DAY", "DAYOFWEEK",
+    "DAYOFYEAR", "DELETE", "DESC", "DISTINCT", "DROP", "ELSE", "EMPTY", "END", "EXISTS", "EXPORT",
+    "EXTRACT", "FALSE", "FLOAT", "FROM", "GROUP", "HAVING", "HOUR", "IF", "IMPORT", "IN", "INDEX",
+    "INNER", "INSERT", "INTEGER", "INTO", "IS", "JOIN", "LARGEINT", "LEADING", "LEFT", "LIKE",
+    "MEMO", "MINUTE", "MOD", "MONTH", "MSECOND", "NOCASE", "NOT", "NULL", "ON", "OPTIMIZE", "OR",
+    "ORDER", "OUTER", "RENAME", "REPAIR", "RIGHT", "ROLLBACK", "SECOND", "SELECT", "SET",
+    "SMALLINT", "START", "TABLE", "THEN", "TIME", "TO", "TOP", "TRAILING", "TRANSACTION", "TRIM",
+    "TRUE", "UNION", "UNIQUE", "UPDATE", "UPGRADE", "VALUES", "VARCHAR", "VERIFY", "WEEK", "WHEN",
+    "WHERE", "WITH", "WORK", "YEAR",
+];
 
 /// A scalar literal appearing on the value side of a predicate.
 #[derive(Debug, Clone, PartialEq)]
@@ -321,6 +344,23 @@ mod tests {
         assert_eq!(p.render().unwrap(), "(\"a\"\"b\" <> 1 AND \"a\"\"b\" IS NOT NULL)");
         // simple names stay bare (matches Dibdog's gen_ident_atom)
         assert_eq!(quote_ident("PRICE"), "PRICE");
+    }
+
+    #[test]
+    fn reserved_words_are_quoted() {
+        // Reserved words are character-valid but must be quoted.
+        assert_eq!(quote_ident("ORDER"), "\"ORDER\"");
+        assert_eq!(quote_ident("DATE"), "\"DATE\"");
+        assert_eq!(quote_ident("TIME"), "\"TIME\"");
+        // Case-insensitive.
+        assert_eq!(quote_ident("order"), "\"order\"");
+        assert_eq!(quote_ident("Select"), "\"Select\"");
+        // Non-reserved simple names stay bare.
+        assert_eq!(quote_ident("PRICE"), "PRICE");
+        assert_eq!(quote_ident("CODE"), "CODE");
+        // A reserved word also quotes when it appears as a predicate column.
+        let p = Pred::IsNull { col: "ORDER".into(), negated: false };
+        assert_eq!(p.render().unwrap(), "\"ORDER\" IS NULL");
     }
 
     #[test]
