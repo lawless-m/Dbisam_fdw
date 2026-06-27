@@ -3,23 +3,23 @@
 //! `exportmaster` decodes DBISAM rows into Arrow arrays; this module maps those
 //! into Wrappers [`Cell`]s for `iter_scan`, and into PG type names for
 //! `IMPORT FOREIGN SCHEMA`. The Arrow types `exportmaster` actually emits
-//! (see its `row.rs`) are: Utf8, Int32, Int64, Float64, Boolean, Date32,
-//! Timestamp(µs), Binary — plus Int64 for DBISAM Time (a current exportmaster
-//! quirk).
+//! (see its `row.rs`) are: Utf8, Int32, Int64, Float64, Decimal128(_,4)
+//! (Currency), Boolean, Date32, Timestamp(µs), Binary — plus Int64 for DBISAM
+//! Time (a current exportmaster quirk).
 //!
-//! KNOWN FIDELITY GAPS to close against doc 05 (both originate in exportmaster,
-//! not here):
-//!   - DBISAM Currency/BCD currently decode to Float64 → mapped to `double
-//!     precision`. Doc 05 requires lossless `numeric`. Fix in exportmaster
-//!     (emit Decimal128), then map to `numeric` here.
+//! Memo vs binary Blob, and Currency vs Float, are disambiguated via the
+//! `exportmaster::DBISAM_TYPE_KEY` field metadata (Currency now arrives as its
+//! own Decimal128 type, so it needs no tag).
+//!
+//! KNOWN FIDELITY GAP (originates in exportmaster, not here):
 //!   - DBISAM Time decodes to Int64 → surfaces as `bigint`, not `time`.
 
 use arrow::array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Float64Array, Int32Array, Int64Array,
-    StringArray, TimestampMicrosecondArray,
+    Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float64Array,
+    Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, Field};
-use pgrx::datum::{Date, IntoDatum, Timestamp};
+use pgrx::datum::{AnyNumeric, Date, IntoDatum, Timestamp};
 use supabase_wrappers::prelude::Cell;
 
 /// The DBISAM type tag for a column, from the Arrow field metadata exportmaster
@@ -48,6 +48,11 @@ pub fn array_cell(field: &Field, array: &ArrayRef, row: usize) -> Option<Cell> {
         DataType::Int32 => downcast::<Int32Array>(array).map(|a| Cell::I32(a.value(row))),
         DataType::Int64 => downcast::<Int64Array>(array).map(|a| Cell::I64(a.value(row))),
         DataType::Float64 => downcast::<Float64Array>(array).map(|a| Cell::F64(a.value(row))),
+        // DBISAM Currency → Decimal128(_, 4); to PG numeric, losslessly, via the
+        // decimal's own string form (no f64 round-trip).
+        DataType::Decimal128(_, _) => downcast::<Decimal128Array>(array)
+            .and_then(|a| AnyNumeric::try_from(a.value_as_string(row).as_str()).ok())
+            .map(Cell::Numeric),
         DataType::Date32 => downcast::<Date32Array>(array).and_then(|a| {
             // Arrow days-since-1970 → pgrx Date (days-since-2000).
             Date::try_from(a.value(row) - UNIX_TO_PG_EPOCH_DAYS).ok().map(Cell::Date)
@@ -84,7 +89,8 @@ pub fn arrow_pg_type(field: &Field) -> &'static str {
         DataType::Boolean => "boolean",
         DataType::Int32 => "integer",
         DataType::Int64 => "bigint",
-        DataType::Float64 => "double precision", // see fidelity gap: currency → numeric
+        DataType::Float64 => "double precision",
+        DataType::Decimal128(_, _) => "numeric", // DBISAM Currency, lossless
         DataType::Date32 => "date",
         DataType::Timestamp(_, _) => "timestamp",
         DataType::Binary | DataType::LargeBinary => {

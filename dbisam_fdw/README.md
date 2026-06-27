@@ -79,6 +79,11 @@ Verified live (PG → dbisam_fdw → exportmaster → DBISAM):
   DBISAM projection (so the blob resolver's `columns[0]`-is-PK rule holds even
   for `SELECT <memo>` alone); the injected PK is dropped from output. IMPORT
   FOREIGN SCHEMA sets `pk` automatically.
+- **Currency → `numeric`** (lossless): `PRODUCT.PRICE` returns `79.3400` typed
+  as PG `numeric`, and arithmetic works (`PRICE * 1.2`). Fixing this surfaced a
+  real exportmaster bug — DBISAM stores `ftCurrency` on disk as an IEEE-754
+  *double* (not a scaled Int64); it's now read as f64 and rounded into
+  `Decimal128(38, 4)`.
 
 Known gaps:
 - **Session reuse fails.** Sequential queries on one Exportmaster session error
@@ -86,9 +91,5 @@ Known gaps:
   the broker decision (`06`, Q4) — per-backend reuse needs protocol work.
 - Pushing `IS NULL` and date/time predicates (need the DBISAM `#…#` literal
   pinned vs Dibdog).
-- **Currency → `numeric`.** exportmaster now *tags* currency columns, but still
-  decodes them to `Float64` (lossy); the FDW maps that to `double precision`.
-  Lossless `numeric` needs exportmaster to emit Decimal128 — the tag alone
-  doesn't restore precision.
 - Live end-to-end is via the pgrx-managed PG15; streaming (vs materialising the
   whole batch in `begin_scan`) is a later refinement.
