@@ -48,67 +48,58 @@ login state as part of the statement lifecycle — not because we asked it to.
 The login that establishes the session is `connect → login (0x0014) →
 session-setup (C2, C3, catalog-attach 0x003c, C5)` in `connect_and_login`.
 
-## Root-cause hypotheses (ranked)
+## Experiment results (run live against rivsem04)
 
-1. **The server's session is single-statement: a completed statement lifecycle
-   drops the connection back to pre-login.** DBISAM's server appears to bind the
-   logged-in state to one prepare/execute/cursor cycle; once it's reset/released,
-   the connection is "logged out" for the purposes of a new `PrepareStatement`.
-   This matches "request before login" exactly and matches the fact that nothing
-   in our teardown is a logout. **Most consistent with the evidence.**
+Driven by `exportmaster/examples/session_reuse_probe.rs` (query =
+`SELECT CODE, PRICE FROM PRODUCT TOP 2`):
 
-2. **One of the teardown messages de-registers the session.**
-   `RemoveAllRemoteMemoryTables` (0x0029) or `ResetStatement` may do more than
-   intended and tear down login state. Plausible but weaker — a "remove temp
-   tables" op logging you out would be odd.
+| Experiment | Query 2 outcome |
+| --- | --- |
+| **Baseline** — 2 queries on one `Client`, default teardown | **FAIL `0x2C2C`** (confirms the symptom) |
+| **E1** — query 1 teardown *minus* `RemoveAllRemoteMemoryTables` (0x0029) | **FAIL `0x2C2C`** — the release is **not** the culprit |
+| **E2** — `reauth` (re-login + session-setup) on the *same socket*, then query 2 | **OK (2 rows)** — a socket can carry many queries |
 
-3. **A per-statement re-attach is required.** The catalog attach (0x003c) or part
-   of session-setup must be re-issued before each statement, and skipping it
-   reads to the server as "not logged in."
+So:
 
-## Is reuse achievable? — two experiments
+- **Hypothesis 1 (confirmed): the server drops login state per statement
+  lifecycle.** A completed prepare/execute/cursor cycle returns the connection to
+  pre-login; the next `PrepareStatement` needs a fresh login.
+- **Hypothesis 2 (rejected):** skipping the temp-table release changes nothing.
+- The decisive new fact: **a fresh login on the *existing socket* (no TCP
+  reconnect, no repeat of the one-time Connect handshake) is accepted and lets
+  the next query run.** A TCP connection is reusable; a *login* is not.
 
-Neither is done here (the deliverable is this doc; reuse is not blocking). Both
-are cheap to run against rivsem04 with the existing `run_query`/`find_memo`
-examples:
+This is exposed as `Client::reauth(&opts)` in exportmaster.
 
-- **E1 — lighter teardown.** Run query 1 omitting `RemoveAllRemoteMemoryTables`
-  (and/or `ResetStatement`), then issue query 2's `PrepareStatement` on the same
-  `Client`. If query 2 succeeds, hypothesis 2 holds and reuse is a one-line
-  teardown change. If it still returns `0x2C2C`, hypothesis 2 is out.
+## What this means
 
-- **E2 — re-login on the same socket.** After query 1's teardown, re-issue
-  `login (0x0014) + session-setup` on the *existing* socket (no TCP reconnect)
-  before query 2's `PrepareStatement`. If accepted, hypothesis 1 holds: the
-  server requires a fresh login per statement, but you can do it without a new
-  TCP connection. If it's rejected too, the connection itself is spent and only a
-  full reconnect works.
+Two costs were conflated. Re-login on a kept socket separates them:
 
-The result that matters for Q4 is **E2**: does avoiding the TCP reconnect still
-require a login (so every query is a login regardless), or can a socket carry
-many logins cheaply?
+- **TCP connect + Connect handshake** — one-time per socket; **reusable** (E2).
+- **Login (0x0014) + session-setup** — required **per query**; *not* reusable.
+
+So **per-backend socket reuse is real and worth doing** (keep the socket, call
+`reauth` before each query — saves the TCP connect/handshake per query). But it
+does **not** reduce the login *count*: N queries = N logins regardless. The
+login-storm constraint is about *concurrent* logins across backends, which socket
+reuse does not address.
 
 ## Recommendation for doc 06 (Q4: broker vs serialise)
 
-This sharpens Q4 against the "per-backend session reuse is cheap" assumption:
+- **Adopt per-backend socket reuse in the FDW now** (cheap, E2-proven): hold one
+  `Client` per backend, `reauth` per scan instead of `connect_and_login`. Removes
+  the TCP churn; correct and safe.
+- **The storm still needs a serialise/broker answer**, because the login count is
+  irreducible and *concurrency* is the server's limit. With E2 in hand the
+  cleanest shape is a **broker that owns a bounded pool of persistent sockets and
+  serialises the login+query on them** — i.e. a broker whose value is *serialising
+  logins over warm sockets*, not *holding pre-authenticated reusable sessions*
+  (which DBISAM does not support). If that's too much code for now, the simpler
+  **in-process serialise/rate-limit** (cap concurrent logins, queue the burst) is
+  the fallback.
 
-- If hypothesis 1 holds (likely), **a DBISAM connection cannot amortise its login
-  across queries** — N queries ≈ N logins no matter what. A connection *pool* of
-  pre-authenticated sessions then buys little, because each pooled session still
-  only serves one statement before needing re-login. The real lever becomes
-  **serialising / rate-limiting logins** so the bursty DirectQuery fan-out never
-  presents a concurrent login storm — i.e. lean toward the **serialise** option
-  (or a broker whose job is to *serialise logins*, not to *hold reusable
-  sessions*).
-
-- If E1 succeeds (hypothesis 2), reuse is nearly free: fix the teardown and a
-  single backend can run many queries on one login — which makes per-backend
-  reuse real and de-prioritises the broker.
-
-**Action:** run E1 then E2 (a ~1 hour experiment) before committing to a Q4
-design. Until then, the FDW's current one-login-per-scan behaviour is correct and
-safe; the open risk is purely the login-storm rate under a real multi-visual
-DirectQuery page, which the serialise/broker decision must address.
+**Net:** Q4 narrows to *broker-over-warm-sockets vs in-process rate-limit* — both
+built on per-backend socket reuse + per-query `reauth`. Joins/scope unchanged.
 
 ## Pointers
 
