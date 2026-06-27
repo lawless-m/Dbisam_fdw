@@ -84,22 +84,58 @@ does **not** reduce the login *count*: N queries = N logins regardless. The
 login-storm constraint is about *concurrent* logins across backends, which socket
 reuse does not address.
 
+## Login-storm measurement (live, single run)
+
+`exportmaster/examples/login_storm.rs` ramps concurrency: N threads barrier-synced
+to fire `connect_and_login` + a trivial query at once.
+
+| Concurrency | Logins OK | Failure |
+| --- | --- | --- |
+| 2 | 2/2 | — (first wave wall 10s — cold-start artifact) |
+| 4 | 4/4 | — |
+| 8 | 6/8 | 2× **Connection refused (os 111)** |
+| 16 | 13/16 | 3× Connection refused |
+| 32 | 19/32 | 13× Connection refused |
+
+The failure is **TCP connection-refused**, *not* a DBISAM login-rejection
+reqcode (no `0x2C17`). So "the server rejects login storms" really means its
+TCP accept path (small listen backlog / serial accept) drops connections under a
+concurrent-*connect* burst. Clean to ~4 concurrent; failures begin at 8 and
+reach ~40% at 32. An 8-visual DirectQuery page that opens 8 fresh connections at
+once would already lose ~25%.
+
+(Single run against production — not repeated, to avoid disrupting real users.)
+
 ## Recommendation for doc 06 (Q4: broker vs serialise)
 
-- **Adopt per-backend socket reuse in the FDW now** (cheap, E2-proven): hold one
-  `Client` per backend, `reauth` per scan instead of `connect_and_login`. Removes
-  the TCP churn; correct and safe.
-- **The storm still needs a serialise/broker answer**, because the login count is
-  irreducible and *concurrency* is the server's limit. With E2 in hand the
-  cleanest shape is a **broker that owns a bounded pool of persistent sockets and
-  serialises the login+query on them** — i.e. a broker whose value is *serialising
-  logins over warm sockets*, not *holding pre-authenticated reusable sessions*
-  (which DBISAM does not support). If that's too much code for now, the simpler
-  **in-process serialise/rate-limit** (cap concurrent logins, queue the burst) is
-  the fallback.
+The two findings together point to one answer:
 
-**Net:** Q4 narrows to *broker-over-warm-sockets vs in-process rate-limit* — both
-built on per-backend socket reuse + per-query `reauth`. Joins/scope unchanged.
+- E2: a **warm TCP socket** is reusable for many queries (re-login per query, no
+  reconnect).
+- Storm: the thing that breaks under load is **opening fresh connections
+  concurrently** (TCP refused at ~8+), not the logins themselves.
+
+So the design that avoids the failure mode entirely is a **broker that owns a
+small bounded pool of persistent (warm) sockets** — open them once, keep them,
+and serve each query by `reauth` + query over a borrowed warm socket. This:
+
+- never opens connections under burst (the pool is pre-warmed), so it never hits
+  the connection-refused wall;
+- caps concurrent server load at the pool size (set it at/below the clean
+  threshold — **~4** from the measurement, tune live);
+- needs no reusable *sessions* (which DBISAM doesn't support) — just reusable
+  *sockets*, which it does.
+
+**Recommendation: build the out-of-process broker over a warm-socket pool (~4),
+not an in-process rate-limiter.** The rate-limiter would still pay a TCP connect
+per query and only queues the burst; the warm-socket broker removes the connect
+storm at the root. Either way, FDW backends should borrow from the broker rather
+than `connect_and_login` per scan.
+
+**Interim (before the broker exists):** the FDW's one-`connect_and_login`-per-scan
+is correct; just cap how many PG backends hit DBISAM at once (keep the
+On-Premises Gateway / PG connection pool ≤ ~4 to DBISAM-backed work) to stay
+under the connection-refused threshold. Joins/scope unchanged.
 
 ## Pointers
 
