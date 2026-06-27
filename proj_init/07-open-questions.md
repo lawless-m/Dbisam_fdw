@@ -43,12 +43,17 @@ DirectQuery connection profile sets eager automatically, or whether it is left
 to the operator. Interacts with the login-storm constraint (eager probe must
 stay serial). See docs 05 and 06.
 
-## Q4 — Broker vs serialise for Exportmaster concurrency?
+## Q4 — Broker vs serialise for Exportmaster concurrency? — MEASURED & PARKED
 
-Per-backend session reuse is settled (do it). The out-of-process broker vs
-in-process serialising-pool decision depends on measured DirectQuery
-concurrency against the real server's login tolerance. Treat as a sized
-experiment early. See doc 06.
+Resolved by experiment (see `09-session-reuse.md`), then **parked** — not needed
+for milestone 1. Findings: a DBISAM *login* can't be reused across queries
+(`0x2C2C`), but a warm TCP *socket* can (`Client::reauth`); and the real load
+limit is the server's TCP accept path refusing *concurrent connections* (clean
+to ~4, failing from 8). Answer when it's needed: an out-of-process **broker over
+a ~4 warm-socket pool**, with `reauth` as its per-query step (so no standalone
+FDW reuse work). **Interim for milestone 1:** keep concurrent PG→DBISAM backends
+≤ ~4 (gateway/PG pool); the FDW's connect-per-scan is fine. Revisit the broker
+only if a real DirectQuery page shows it's needed.
 
 ## Q5 — Aggregate pushdown: when does phase 2 start?
 
