@@ -69,24 +69,26 @@ The `ForeignDataWrapper` trait is implemented and **compiles against PG15**;
   Wrappers-shaped form of doc 02's read-only contract — Wrappers' modify
   methods default to silent no-ops, so absence isn't enough here).
 
-Verified live: scalar scans (`MikeTest`) and **memo/blob resolution**
-(`ARCVCFG.ACMemo`, via `OpenBlob`/`FreeBlob`) both return correct data through
-PG → dbisam_fdw → exportmaster → DBISAM.
+Verified live (PG → dbisam_fdw → exportmaster → DBISAM):
+- scalar scans (`MikeTest`);
+- **memo resolution as `text`** (`ARCVCFG.ACMemo`, via `OpenBlob`/`FreeBlob`):
+  exportmaster tags each column with its DBISAM `FieldType` in the Arrow field
+  metadata, so the FDW maps Memo→`text` (Win-1252→UTF-8) and binary Blob/Graphic
+  →`bytea`;
+- **PK auto-injection**: a `pk` table option lets the FDW prepend the PK to the
+  DBISAM projection (so the blob resolver's `columns[0]`-is-PK rule holds even
+  for `SELECT <memo>` alone); the injected PK is dropped from output. IMPORT
+  FOREIGN SCHEMA sets `pk` automatically.
 
 Known gaps:
-- **Memo → bytea, not text.** Memo columns surface as `bytea` (the resolved
-  blob bytes); doc 05 wants `text` (Win-1252→UTF-8). The Arrow schema can't tell
-  Memo from a binary Blob/Graphic — both are Binary — so this needs exportmaster
-  to expose the DBISAM `FieldType` per column; then the FDW maps Memo→text,
-  Blob/Graphic→bytea. For now: `convert_from(col, 'WIN1252')` in SQL.
-- **PK auto-injection.** Blob resolution derives each row's `OpenBlob` slot from
-  `columns[0]`, treating it as the PK. So a memo/blob column must be projected
-  *with the PK as the first column*; `SELECT <memo>` alone breaks resolution.
-  The FDW must auto-inject the PK into the projection (doc 05) — not yet done.
 - **Session reuse fails.** Sequential queries on one Exportmaster session error
   (2nd `PrepareStatement` → `0x2C2C`); each query needs a fresh login. Sharpens
   the broker decision (`06`, Q4) — per-backend reuse needs protocol work.
 - Pushing `IS NULL` and date/time predicates (need the DBISAM `#…#` literal
-  pinned vs Dibdog); currency→`numeric` fidelity (an exportmaster decode gap).
+  pinned vs Dibdog).
+- **Currency → `numeric`.** exportmaster now *tags* currency columns, but still
+  decodes them to `Float64` (lossy); the FDW maps that to `double precision`.
+  Lossless `numeric` needs exportmaster to emit Decimal128 — the tag alone
+  doesn't restore precision.
 - Live end-to-end is via the pgrx-managed PG15; streaming (vs materialising the
   whole batch in `begin_scan`) is a later refinement.

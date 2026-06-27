@@ -31,12 +31,19 @@ pub fn import(opts: &ConnOpts, stmt: &ImportForeignSchemaStmt) -> DbisamFdwResul
         let cols = schema
             .fields()
             .iter()
-            .map(|f| format!("\"{}\" {}", f.name(), crate::typemap::arrow_pg_type(f.data_type())))
+            .map(|f| format!("\"{}\" {}", f.name(), crate::typemap::arrow_pg_type(f.as_ref())))
             .collect::<Vec<_>>()
             .join(", ");
+        // Column 0 is the DBISAM PK (protocol §4); emit it as the `pk` option so
+        // the FDW can auto-inject it for blob/memo resolution.
+        let pk_opt = schema
+            .fields()
+            .first()
+            .map(|f| format!(", pk '{}'", f.name()))
+            .unwrap_or_default();
         ddl.push(format!(
             "CREATE FOREIGN TABLE IF NOT EXISTS {local}.\"{table}\" ({cols}) \
-             SERVER {server} OPTIONS (table '{table}')"
+             SERVER {server} OPTIONS (table '{table}'{pk_opt})"
         ));
     }
     Ok(ddl)

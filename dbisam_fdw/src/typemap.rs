@@ -18,9 +18,15 @@ use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Float64Array, Int32Array, Int64Array,
     StringArray, TimestampMicrosecondArray,
 };
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field};
 use pgrx::datum::{Date, IntoDatum, Timestamp};
 use supabase_wrappers::prelude::Cell;
+
+/// The DBISAM type tag for a column, from the Arrow field metadata exportmaster
+/// attaches (`exportmaster::DBISAM_TYPE_KEY`). `None` if absent.
+fn dbisam_tag(field: &Field) -> Option<&str> {
+    field.metadata().get(exportmaster::DBISAM_TYPE_KEY).map(String::as_str)
+}
 
 /// Days between the Unix epoch (Arrow Date32 origin, 1970-01-01) and the
 /// Postgres epoch (2000-01-01). Arrow stores days since 1970; pgrx `Date`
@@ -30,7 +36,9 @@ const UNIX_TO_PG_EPOCH_DAYS: i32 = 10_957;
 const UNIX_TO_PG_EPOCH_MICROS: i64 = 10_957 * 86_400 * 1_000_000;
 
 /// One value from an Arrow column at `row`, as a Wrappers cell (`None` = NULL).
-pub fn array_cell(array: &ArrayRef, row: usize) -> Option<Cell> {
+/// `field` carries the DBISAM type tag, used to split Memo (text) from a binary
+/// Blob/Graphic — both arrive as Arrow Binary.
+pub fn array_cell(field: &Field, array: &ArrayRef, row: usize) -> Option<Cell> {
     if array.is_null(row) {
         return None;
     }
@@ -47,16 +55,18 @@ pub fn array_cell(array: &ArrayRef, row: usize) -> Option<Cell> {
         DataType::Timestamp(_, _) => downcast::<TimestampMicrosecondArray>(array).and_then(|a| {
             Timestamp::try_from(a.value(row) - UNIX_TO_PG_EPOCH_MICROS).ok().map(Cell::Timestamp)
         }),
-        // Blob / Memo / Graphic columns: exportmaster resolves the handle to the
-        // raw bytes (Arrow Binary), which we surface as bytea. NOTE: doc 05 wants
-        // *Memo* mapped to text (Win-1252 → UTF-8), but the Arrow schema can't
-        // tell Memo from a true binary blob — both are Binary. Distinguishing
-        // them needs exportmaster to expose the DBISAM FieldType per column;
-        // until then, bytea is the lossless choice and the user can
-        // `convert_from(col, 'WIN1252')` for memo text.
-        DataType::Binary => downcast::<BinaryArray>(array)
-            .and_then(|a| a.value(row).into_datum())
-            .map(|d| Cell::Bytea(d.cast_mut_ptr())),
+        // Blob/Memo/Graphic resolve to raw bytes (Arrow Binary). A *Memo* is
+        // text (doc 05): decode Win-1252 → UTF-8 and surface as a string.
+        // Everything else binary stays bytea (lossless).
+        DataType::Binary => {
+            let a = downcast::<BinaryArray>(array)?;
+            let bytes = a.value(row);
+            if dbisam_tag(field) == Some("memo") {
+                Some(Cell::String(exportmaster::decode_dbisam_text(bytes)))
+            } else {
+                bytes.into_datum().map(|d| Cell::Bytea(d.cast_mut_ptr()))
+            }
+        }
         _ => None,
     }
 }
@@ -65,10 +75,11 @@ fn downcast<T: 'static>(array: &ArrayRef) -> Option<&T> {
     array.as_any().downcast_ref::<T>()
 }
 
-/// PostgreSQL type name for an Arrow column type, used to emit
-/// `CREATE FOREIGN TABLE` DDL during `IMPORT FOREIGN SCHEMA`.
-pub fn arrow_pg_type(dt: &DataType) -> &'static str {
-    match dt {
+/// PostgreSQL type name for a result column, used to emit `CREATE FOREIGN TABLE`
+/// DDL during `IMPORT FOREIGN SCHEMA`. Uses the DBISAM tag to split Memo (text)
+/// from binary blobs.
+pub fn arrow_pg_type(field: &Field) -> &'static str {
+    match field.data_type() {
         DataType::Utf8 => "text",
         DataType::Boolean => "boolean",
         DataType::Int32 => "integer",
@@ -76,7 +87,13 @@ pub fn arrow_pg_type(dt: &DataType) -> &'static str {
         DataType::Float64 => "double precision", // see fidelity gap: currency → numeric
         DataType::Date32 => "date",
         DataType::Timestamp(_, _) => "timestamp",
-        DataType::Binary | DataType::LargeBinary => "bytea",
+        DataType::Binary | DataType::LargeBinary => {
+            if dbisam_tag(field) == Some("memo") {
+                "text"
+            } else {
+                "bytea"
+            }
+        }
         _ => "text",
     }
 }

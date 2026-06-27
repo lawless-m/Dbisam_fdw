@@ -123,14 +123,28 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
             .ok_or_else(|| DbisamFdwError::Options("foreign table option `table` is required".into()))?;
 
         // Projection: only the requested columns travel the wire.
+        //
+        // PK auto-injection (doc 05): blob/memo resolution reconstructs each
+        // row's OpenBlob slot from the *first* projected column, which must be
+        // the table's PK. So when a `pk` table option is set we prepend it
+        // (deduped). If the PK wasn't requested it's fetched but ignored on
+        // output (iter_scan looks columns up by name). IMPORT FOREIGN SCHEMA
+        // sets `pk` automatically; set it by hand for tables with memo/blob
+        // columns created manually.
+        let pk = options.get("pk").map(String::as_str);
         let projection = if columns.is_empty() {
             "*".to_string()
         } else {
-            columns
-                .iter()
-                .map(|c| format!("\"{}\"", c.name))
-                .collect::<Vec<_>>()
-                .join(", ")
+            let mut names: Vec<&str> = Vec::with_capacity(columns.len() + 1);
+            if let Some(pk) = pk {
+                names.push(pk);
+            }
+            for c in columns {
+                if Some(c.name.as_str()) != pk {
+                    names.push(c.name.as_str());
+                }
+            }
+            names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ")
         };
 
         // Filter: render the foldable subset; the rest is rechecked by Postgres.
@@ -171,10 +185,11 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
             return Ok(None);
         }
         let r = self.row_idx;
+        let schema = batch.schema();
         for col in &self.tgt_cols {
-            let cell = match batch.column_by_name(&col.name) {
-                Some(array) => typemap::array_cell(array, r),
-                None => None,
+            let cell = match schema.index_of(&col.name) {
+                Ok(idx) => typemap::array_cell(schema.field(idx), batch.column(idx), r),
+                Err(_) => None,
             };
             row.push(&col.name, cell);
         }
