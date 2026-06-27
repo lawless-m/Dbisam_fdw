@@ -104,7 +104,10 @@ concurrent-*connect* burst. Clean to ~4 concurrent; failures begin at 8 and
 reach ~40% at 32. An 8-visual DirectQuery page that opens 8 fresh connections at
 once would already lose ~25%.
 
-(Single run against production — not repeated, to avoid disrupting real users.)
+(Measured on **rivsem04, the dev server** — safe to hammer. The ~4 clean-concurrency
+threshold is a dev-box figure: TCP listen-backlog / accept behaviour is config- and
+hardware-dependent, so **re-measure against the real production target** before
+sizing the broker's warm-socket pool to it.)
 
 ## Recommendation for doc 06 (Q4: broker vs serialise)
 
