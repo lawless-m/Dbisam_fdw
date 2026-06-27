@@ -38,9 +38,10 @@ and the two are a wash.
 2. **Big aggregates belong on the daily Parquet dump, not live DBISAM.** Measured:
    DuckDB over `analysis.parquet` (4.81M rows, columnar, **no DBISAM / no
    rivsem04**) runs this same `GROUP BY` in **0.36 s cold / 0.52 s warm** —
-   ~260× faster than DBISAM's 96 s, and zero load on the production server. The
-   live FDW cannot compete with a columnar snapshot for full-table analytics —
-   and shouldn't try.
+   ~260× faster than DBISAM's 96 s, and zero load on the server. The live FDW
+   cannot compete with a columnar snapshot for full-table analytics — and
+   shouldn't try. (And 96 s is the *best* live case: it's the native exportmaster
+   path; the DBISAM ODBC driver is slower still, so the gap only widens.)
 3. **The live FDW's sweet spot is small / selective / recent queries** — anything
    that hits one of the ≤4 indexes or a tight filter, so DBISAM scans a bounded
    slice rather than the whole table. There, filter+limit pushdown (already

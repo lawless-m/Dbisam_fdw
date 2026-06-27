@@ -52,10 +52,11 @@ core and the grammar; it does **not** share a codebase with any of them.
 
 ## Why native protocol, not ODBC
 
-The Elevate Software DBISAM ODBC driver is Windows-only and has compounding
-bugs in its bulk-fetch path that cause silent row loss (see MrsFlow
-`KNOWN_BUGS.md §B1`). Delilah and dbisam_fdw both bypass it entirely by
-speaking the wire protocol over TCP. This also removes any deployment
-constraint: the FDW just opens a socket to the DBISAM server (default port
-12005), so Postgres on Debian is fine — there is no in-process Windows driver
-to host.
+The Elevate Software DBISAM ODBC driver is Windows-only, has compounding bugs in
+its bulk-fetch path that cause silent row loss (see MrsFlow `KNOWN_BUGS.md §B1`),
+**and is slower** than the native cursor protocol (confirmed in practice — the
+ODBC fetch path takes longer than the exportmaster path the FDW uses). So native
+wins on three axes: correctness, deployment, and speed. Delilah and dbisam_fdw
+both bypass ODBC entirely by speaking the wire protocol over TCP. The deployment
+win: the FDW just opens a socket to the DBISAM server (default port 12005), so
+Postgres on Debian is fine — there is no in-process Windows driver to host.
