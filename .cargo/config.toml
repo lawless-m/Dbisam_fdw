@@ -1,0 +1,5 @@
+# Resolve the `exportmaster` git dependency through the `github-lawless` SSH
+# host alias (the same alias this repo's `origin` remote uses). libgit2 doesn't
+# read ~/.ssh/config Host aliases, so fetch git deps via the git CLI.
+[net]
+git-fetch-with-cli = true

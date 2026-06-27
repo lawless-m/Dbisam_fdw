@@ -38,7 +38,7 @@ supabase-wrappers = "=0.1.28"
 
 # The pushdown renderer (this repo) and the protocol client (sibling repo).
 dbisam-sql = { path = "../dbisam-sql" }
-exportmaster = { path = "../../exportmaster" }
+exportmaster = { git = "ssh://git@github-lawless/lawless-m/exportmaster.git", branch = "main" }
 # To handle the RecordBatch exportmaster hands back. Match exportmaster's pin.
 arrow = { version = "53", default-features = false }
 
