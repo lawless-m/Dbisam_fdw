@@ -34,6 +34,26 @@ And it matches the model already trusted in Delilah. The earlier instinct to
 fold joins/aggregates "purely into exportmaster" was a misreading of
 "purely"; purely means single-source, not all-operations-server-side.
 
+## Primary use case: PowerBI refresh (not interactive DirectQuery)
+
+The primary use case is **PowerBI dataset refresh** (Import mode): PowerBI bulk-
+reads the curated single-source tables in on a schedule and aggregates them
+itself. DirectQuery is a secondary, supported mode (see `01-overview.md`). This
+*reinforces* the boundary rather than changing it, and de-prioritises two
+deferred questions:
+
+- A refresh never runs interactive aggregates against the FDW — PowerBI groups in
+  VertiPaq after import. So single-table aggregate pushdown (the "second pass"
+  below, Q5) loses most of its remaining motivation, on top of being measured
+  scan-bound (`11-aggregate-perf.md`).
+- A refresh is an orchestrated, mostly-sequential pull, not a bursty concurrent
+  DirectQuery storm — so the connection-broker question (Q4, `09-session-reuse.md`)
+  relaxes too; a refresh can throttle itself to a few connections.
+
+What the boundary must deliver for a refresh is **correct, complete bulk reads**
+(faithful types, no silent row loss) of **live** data — the part the daily Parquet
+dump can't cover. Speed is explicitly not the bar.
+
 ## Explicitly out of scope for milestone 1
 
 - **Writes.** Read-only. See "Read-only as structure" below. ExportKing
@@ -69,6 +89,13 @@ for PG to crunch is the one place the let-the-engine-do-it model strains.
 Collapsing that `GROUP BY` into a server-side aggregate so DBISAM returns a
 handful of rows is worth doing — **later**, as a deliberate second milestone,
 and only for single-table aggregates. Joins still never go down.
+
+Update: under refresh-primary this earns *less* keep, not more — PowerBI
+aggregates after import, and the one place it'd help (interactive grouped visuals)
+is better served by the Parquet snapshot, which is both fresh-enough for analytics
+and far faster. And it was measured scan-bound anyway (`11-aggregate-perf.md`):
+pushing the `GROUP BY` down saves wire transfer, not latency. Build it only for a
+specific wire-bound or PG-memory-bound deployment.
 
 ## Refined rule of thumb
 

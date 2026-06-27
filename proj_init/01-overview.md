@@ -22,20 +22,38 @@ engine. dbisam_fdw reproduces it with Postgres as the engine instead. The
 advantage carries over for free: any SQL Postgres can parse, it can serve,
 and only the innermost table reads turn into DBISAM scans.
 
-## First use case
+## First use case — PowerBI **refresh**
 
-DirectQuery connections from **app.powerbi.com** pointed purely into
-Exportmaster. "Purely" means *single-source* — every table in the report
-comes from DBISAM, nothing federated alongside it — **not** "every operation
-runs on the DBISAM box."
+The primary use case is **refreshing PowerBI datasets** (Import mode) from
+Exportmaster — PowerBI pulls the curated tables in on a schedule and aggregates
+them itself (VertiPaq). Everything is *single-source*: every table comes from
+DBISAM, nothing federated alongside it — **not** "every operation runs on the
+DBISAM box."
 
-This use case is why the FDW is the right shape. PowerBI DirectQuery does not
-emit tidy SQL; it generates layered subqueries and derived tables, often
-nested several levels deep. Pointed straight at DBISAM that SQL fails on
-contact — DBISAM cannot parse it. Pointed at Postgres, PG swallows the whole
-nested structure and only the leaf table reads become DBISAM scans. The
-complexity PowerBI generates that DBISAM could never handle gets absorbed by
-the engine above, exactly as it does in DuckDB today.
+What the FDW gives a refresh is **correct + live**, not fast:
+
+- **Correct.** A clean Postgres endpoint with faithful types — lossless
+  `numeric`/currency, real `date`/`time`/`timestamp`, memo→`text` (Win-1252→
+  UTF-8), blobs as `bytea` — and no silent row loss (the ODBC driver's bug). The
+  type-fidelity work *is* the product here.
+- **Live.** A refresh off the FDW sees *current* DBISAM data. This is the one
+  thing the daily Parquet dump (`/mnt/.../Outputs/Parquets/em`) structurally
+  cannot be. Parquet already owns fast + day-old analytics — that's why the dumps
+  exist; the FDW owns the fresher-than-daily / live path, and a boring SQL
+  endpoint nobody has to be re-taught to use.
+
+Speed is explicitly *not* the goal: a refresh is a background batch, so a 96 s
+full scan is fine. Big interactive analytics belong on the Parquet snapshot, not
+the live FDW (see `11-aggregate-perf.md`). A refresh that's fine with day-old
+data should just import the Parquet and skip DBISAM; the FDW earns its place only
+when the refresh needs live data.
+
+**DirectQuery is a secondary, supported mode**, not the primary one. It works for
+the same reason: PowerBI emits layered, nested SQL that DBISAM could never parse;
+pointed at Postgres, PG swallows the whole structure and only the leaf table reads
+become DBISAM scans (exactly as DuckDB does for Delilah). But interactive latency
+is bounded by DBISAM's full scans, so DirectQuery is for small/selective/recent
+queries, not full-table dashboards.
 
 ## Family
 
