@@ -4,22 +4,18 @@
 //! into Wrappers [`Cell`]s for `iter_scan`, and into PG type names for
 //! `IMPORT FOREIGN SCHEMA`. The Arrow types `exportmaster` actually emits
 //! (see its `row.rs`) are: Utf8, Int32, Int64, Float64, Decimal128(_,4)
-//! (Currency), Boolean, Date32, Timestamp(µs), Binary — plus Int64 for DBISAM
-//! Time (a current exportmaster quirk).
+//! (Currency), Boolean, Date32, Time64(µs), Timestamp(µs), Binary.
 //!
 //! Memo vs binary Blob, and Currency vs Float, are disambiguated via the
 //! `exportmaster::DBISAM_TYPE_KEY` field metadata (Currency now arrives as its
 //! own Decimal128 type, so it needs no tag).
-//!
-//! KNOWN FIDELITY GAP (originates in exportmaster, not here):
-//!   - DBISAM Time decodes to Int64 → surfaces as `bigint`, not `time`.
 
 use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Float64Array,
-    Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
+    Int32Array, Int64Array, StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, Field};
-use pgrx::datum::{AnyNumeric, Date, IntoDatum, Timestamp};
+use pgrx::datum::{AnyNumeric, Date, IntoDatum, Time, Timestamp};
 use supabase_wrappers::prelude::Cell;
 
 /// The DBISAM type tag for a column, from the Arrow field metadata exportmaster
@@ -60,6 +56,11 @@ pub fn array_cell(field: &Field, array: &ArrayRef, row: usize) -> Option<Cell> {
         DataType::Timestamp(_, _) => downcast::<TimestampMicrosecondArray>(array).and_then(|a| {
             Timestamp::try_from(a.value(row) - UNIX_TO_PG_EPOCH_MICROS).ok().map(Cell::Timestamp)
         }),
+        // DBISAM Time → microseconds since midnight (Arrow Time64), which is
+        // exactly pgrx Time's TimeADT representation.
+        DataType::Time64(_) => downcast::<Time64MicrosecondArray>(array)
+            .and_then(|a| Time::try_from(a.value(row)).ok())
+            .map(Cell::Time),
         // Blob/Memo/Graphic resolve to raw bytes (Arrow Binary). A *Memo* is
         // text (doc 05): decode Win-1252 → UTF-8 and surface as a string.
         // Everything else binary stays bytea (lossless).
@@ -92,6 +93,7 @@ pub fn arrow_pg_type(field: &Field) -> &'static str {
         DataType::Float64 => "double precision",
         DataType::Decimal128(_, _) => "numeric", // DBISAM Currency, lossless
         DataType::Date32 => "date",
+        DataType::Time64(_) => "time",
         DataType::Timestamp(_, _) => "timestamp",
         DataType::Binary | DataType::LargeBinary => {
             if dbisam_tag(field) == Some("memo") {
