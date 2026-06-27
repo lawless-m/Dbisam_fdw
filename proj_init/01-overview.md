@@ -30,7 +30,7 @@ them itself (VertiPaq). Everything is *single-source*: every table comes from
 DBISAM, nothing federated alongside it — **not** "every operation runs on the
 DBISAM box."
 
-What the FDW gives a refresh is **correct + live**, not fast:
+What the FDW gives a refresh is **correct + live + secure**, not fast:
 
 - **Correct.** A clean Postgres endpoint with faithful types — lossless
   `numeric`/currency, real `date`/`time`/`timestamp`, memo→`text` (Win-1252→
@@ -41,6 +41,15 @@ What the FDW gives a refresh is **correct + live**, not fast:
   cannot be. Parquet already owns fast + day-old analytics — that's why the dumps
   exist; the FDW owns the fresher-than-daily / live path, and a boring SQL
   endpoint nobody has to be re-taught to use.
+- **Secure.** This may be the deepest reason. Exportmaster has **no TLS and no
+  real user/password management** — a fixed Blowfish login (the shared
+  `elevatesoft` key) over plaintext TCP; it's a trust-the-LAN protocol that can't
+  be safely exposed. Fronting it with Postgres collapses the external surface to a
+  *single* endpoint: **PG on 5432, listening on SSL, with real roles and per-table
+  GRANTs**. PowerBI (via the on-prem gateway) connects there with proper auth and
+  never touches the credential-less DBISAM protocol, which stays internal (PG host
+  → DBISAM, on the trusted network). The FDW is as much a security boundary as a
+  data path.
 
 Speed is explicitly *not* the goal: a refresh is a background batch, so a 96 s
 full scan is fine. Big interactive analytics belong on the Parquet snapshot, not
