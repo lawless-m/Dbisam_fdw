@@ -40,12 +40,21 @@ CREATE SERVER em FOREIGN DATA WRAPPER dbisam_fdw
   OPTIONS (host '...', port '12005', catalog 'NISAINT_CS',
            user '...', password '...');
 
--- One per table (or use IMPORT FOREIGN SCHEMA). Quote columns to preserve the
--- DBISAM column-name case:
+-- One per table:
 CREATE FOREIGN TABLE miketest ("Mike1" text, "Mike2" text)
   SERVER em OPTIONS (table 'MikeTest');
 
 SELECT * FROM miketest;
+
+-- ...or bulk-import, CURATED to a daily Parquet dump's filenames. Never import
+-- the whole catalogue: it's mostly volatile wk<hex> scratch tables (≈357 of 626
+-- on NISAINT_CS). `parquet_dir` restricts the import to tables that have a
+-- <name>.parquet there; real names/case come from the live catalogue, columns
+-- from a live WHERE 1=0 probe, each with its `pk` option set.
+IMPORT FOREIGN SCHEMA dbisam FROM SERVER em INTO public
+  OPTIONS (parquet_dir '/mnt/RIVSPROD02_RI_SERVICES/Outputs/Parquets/em');
+-- (the PG server process must be able to read parquet_dir; only filenames are
+-- read, not contents. Omit the option to import the full, volatile catalogue.)
 ```
 
 Verified end-to-end against a live DBISAM server (PG15 → dbisam_fdw →
