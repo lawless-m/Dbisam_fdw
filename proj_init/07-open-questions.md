@@ -35,13 +35,18 @@ Decision: worth carving `dbisam-sql` out *if* it is cheap given Q1's answer
 extraction is costly, port the renderer into the FDW against Dibdog and accept
 two Rust copies, kept honest by the grammar. Not a blocker either way.
 
-## Q3 — Eager schema default for the PowerBI setup path?
+## Q3 — Eager schema default for the PowerBI setup path? — RESOLVED
 
-Lazy is the better default for query work; PowerBI's modelling view does
-up-front column introspection and will want eager. Decide whether the
-DirectQuery connection profile sets eager automatically, or whether it is left
-to the operator. Interacts with the login-storm constraint (eager probe must
-stay serial). See docs 05 and 06.
+Reframed by the live catalogue: `list_tables` is **volatile**, not a schema —
+~357 of NISAINT_CS's 626 entries are transient `wk<hex>` scratch tables. So
+"import everything" was never the right eager default. The useful set (~198) is
+enumerated by the **daily Parquet dump**, so import curates from it:
+`IMPORT FOREIGN SCHEMA … OPTIONS (parquet_dir '…')` restricts to tables that have
+a `<name>.parquet` file (real names/case from `list_tables`, columns from the
+live `WHERE 1=0` probe, `pk` set per table). Implemented + verified live; see
+`05-type-mapping.md`, the FDW README, and `dbisam_fdw/src/schema_import.rs`.
+Probes are serial, so the login-storm constraint is moot here. Omit the option
+to import the full (volatile) catalogue.
 
 ## Q4 — Broker vs serialise for Exportmaster concurrency? — MEASURED & PARKED
 
