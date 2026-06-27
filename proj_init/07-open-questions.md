@@ -71,7 +71,8 @@ interactive, so it is *not* the answer to slow visuals.
 
 Stays deferred, with the reasoning changed: the real rule is **freshness-vs-size**
 — route big analytics to the daily Parquet dump (DuckDB does this `GROUP BY` in
-<1 s, columnar), and reserve the live FDW for small/selective/recent queries that
+0.36 s, columnar, off the snapshot — no DBISAM), and reserve the live FDW for
+small/selective/recent queries that
 hit an index or a tight filter. Build aggregate pushdown only if a *specific*
 deployment is wire-bound (slow WAN) or PG-memory-bound — re-evaluate then, not as
 a default. Joins still never go down.
