@@ -25,6 +25,28 @@ cargo pgrx schema pg15                              # emit the extension SQL
 cargo pgrx run pg15                                 # install into a throwaway PG15 + psql
 ```
 
+`cargo pgrx run` is a **sandbox** (`~/.pgrx/data-15`) — recreated on demand, not
+the database clients connect to. To use the wrapper for real, install it into
+the system PG15.
+
+## Deploy to the system PG15 (the real database)
+
+There are two PostgreSQL 15s on this box: the pgrx sandbox above, and the system
+server (`/usr/bin/pg_config` → `/usr/lib/postgresql/15/lib`,
+`/usr/share/postgresql/15`). The DDL below only works once the extension's `.so`
++ `.control` + SQL live in the **system** tree. `cargo pgrx install` puts them
+there; rerun it after every code change:
+
+```sh
+cargo pgrx install --release --no-default-features --features pg15 \
+  -c /usr/bin/pg_config        # add --sudo if the PG dirs aren't user-writable
+```
+
+This writes `dbisam_fdw.so` → `/usr/lib/postgresql/15/lib/` and the
+`.control` + SQL → `/usr/share/postgresql/15/extension/`. No restart needed; a
+fresh `psql` session picks it up. Then connect to your target database
+(`psql -d <yourdb>`) and run the DDL below.
+
 ```sql
 CREATE EXTENSION dbisam_fdw;
 
