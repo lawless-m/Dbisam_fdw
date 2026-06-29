@@ -71,8 +71,11 @@ SELECT * FROM miketest;
 -- ...or bulk-import, CURATED to a daily Parquet dump's filenames. Never import
 -- the whole catalogue: it's mostly volatile wk<hex> scratch tables (≈357 of 626
 -- on NISAINT_CS). `parquet_dir` restricts the import to tables that have a
--- <name>.parquet there; real names/case come from the live catalogue, columns
--- from a live WHERE 1=0 probe, each with its `pk` option set.
+-- <name>.parquet there; the real table set comes from the live catalogue,
+-- columns from a live WHERE 1=0 probe. All PG identifiers are lowercased
+-- (DBISAM is case-insensitive, so its stored case is arbitrary noise — folding
+-- to lowercase lets callers write natural unquoted SQL); each table with its
+-- `pk` option set.
 IMPORT FOREIGN SCHEMA dbisam FROM SERVER em INTO public
   OPTIONS (parquet_dir '/mnt/RIVSPROD02_RI_SERVICES/Outputs/Parquets/em');
 -- (the PG server process must be able to read parquet_dir; only filenames are
@@ -138,12 +141,16 @@ than PG wants (a subset) — a superset is always corrected by the recheck.
 
 ## Known gaps
 
-- **Reserved-word column names.** All identifier emission (projection, table,
-  and every predicate) now flows through one `dbisam_sql::quote_ident` that
-  matches Dibdog's `gen_ident_atom`: simple names bare, character-odd names
-  (spaces, leading digit, embedded `"`) double-quoted. Like the oracle, it does
-  *not* quote reserved words used as column names — closing that means teaching
-  Dibdog (and then both renderers) the keyword list.
+- **Identifier case & reserved words** (handled — noted for the residual).
+  `IMPORT FOREIGN SCHEMA` folds every PG-facing identifier to lowercase, since
+  DBISAM is case-insensitive and stores an arbitrary case; `iter_scan` and the
+  `pk` dedup match results case-insensitively to compensate. Wire emission flows
+  through one `dbisam_sql::quote_ident` matching Dibdog's `gen_ident_atom`:
+  simple names bare, character-odd *and reserved* names double-quoted (the
+  keyword list sourced from Dibdog), which DBISAM resolves case-insensitively
+  too. Residual: Postgres itself still makes callers double-quote a reserved-word
+  column (e.g. `"group"`) — inherent to PG, not the FDW; and `INT`-style names
+  absent from DBISAM's keyword set go bare.
 - **Session reuse fails.** Sequential queries on one Exportmaster session error
   (2nd `PrepareStatement` → `0x2C2C`); each query needs a fresh login. Sharpens
   the broker decision (`06`, Q4) — per-backend reuse needs protocol work.

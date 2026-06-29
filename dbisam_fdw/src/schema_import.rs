@@ -80,10 +80,15 @@ fn table_ddl(
         .query_to_table_capped(&format!("SELECT * FROM \"{table}\" WHERE 1=0"), 0)
         .map_err(|e| DbisamFdwError::Protocol(format!("probe {table}: {e}")))?;
     let schema = batch.schema();
+    // DBISAM is case-insensitive and never committed to an identifier scheme, so
+    // the probed case is arbitrary noise. Fold every PG-facing identifier (table,
+    // columns, pk) to lowercase so callers write natural unquoted SQL instead of
+    // quoting the captured case. The `table` option keeps the probed name —
+    // DBISAM ignores its case, and the FDW resolves results case-insensitively.
     let cols = schema
         .fields()
         .iter()
-        .map(|f| format!("\"{}\" {}", f.name(), crate::typemap::arrow_pg_type(f.as_ref())))
+        .map(|f| format!("\"{}\" {}", f.name().to_ascii_lowercase(), crate::typemap::arrow_pg_type(f.as_ref())))
         .collect::<Vec<_>>()
         .join(", ");
     // Column 0 is the DBISAM PK (protocol §4); emit it as the `pk` option so the
@@ -91,10 +96,11 @@ fn table_ddl(
     let pk_opt = schema
         .fields()
         .first()
-        .map(|f| format!(", pk '{}'", f.name()))
+        .map(|f| format!(", pk '{}'", f.name().to_ascii_lowercase()))
         .unwrap_or_default();
+    let pg_table = table.to_ascii_lowercase();
     Ok(format!(
-        "CREATE FOREIGN TABLE IF NOT EXISTS {local}.\"{table}\" ({cols}) \
+        "CREATE FOREIGN TABLE IF NOT EXISTS {local}.\"{pg_table}\" ({cols}) \
          SERVER {server} OPTIONS (table '{table}'{pk_opt})"
     ))
 }

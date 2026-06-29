@@ -20,4 +20,3 @@ CREATE SCHEMA em;
 IMPORT FOREIGN SCHEMA dbisam FROM SERVER sem01 INTO em
     OPTIONS (parquet_dir '/mnt/RIVSPROD02_RI_SERVICES/Outputs/Parquets/em');
 
-	

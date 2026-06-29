@@ -140,7 +140,9 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
                 names.push(pk);
             }
             for c in columns {
-                if Some(c.name.as_str()) != pk {
+                // Case-insensitive: our lowercased PG column names won't string-
+                // match the `pk` option's probed (arbitrary-case) value.
+                if pk.is_none_or(|pk| !c.name.eq_ignore_ascii_case(pk)) {
                     names.push(c.name.as_str());
                 }
             }
@@ -191,10 +193,13 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
         let r = self.row_idx;
         let schema = batch.schema();
         for col in &self.tgt_cols {
-            let cell = match schema.index_of(&col.name) {
-                Ok(idx) => typemap::array_cell(schema.field(idx), batch.column(idx), r),
-                Err(_) => None,
-            };
+            // Case-insensitive: DBISAM echoes result columns in its own arbitrary
+            // case, which won't string-match our lowercased PG column names.
+            let idx = schema
+                .fields()
+                .iter()
+                .position(|f| f.name().eq_ignore_ascii_case(&col.name));
+            let cell = idx.and_then(|i| typemap::array_cell(schema.field(i), batch.column(i), r));
             row.push(&col.name, cell);
         }
         self.row_idx += 1;
