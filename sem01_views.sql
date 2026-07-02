@@ -4,7 +4,12 @@
 -- the DuckDB `sem01` catalog so models port across both.
 --
 -- Idempotent: re-run after any IMPORT FOREIGN SCHEMA to reconcile new/changed
--- tables. Run with psql (NOT pgAdmin/DBeaver — they split the DO block on its
+-- tables. Every existing view in sem01 is dropped and recreated — `CREATE OR
+-- REPLACE VIEW` can't drop/rename/retype columns, so it errors on exactly the
+-- tables that changed shape; recreating sidesteps that, and also removes stale
+-- views whose foreign table has gone. The schema is dedicated to these mirrors:
+-- don't put hand-written views in sem01, the next run will drop them.
+-- Run with psql (NOT pgAdmin/DBeaver — they split the DO block on its
 -- internal semicolons):
 --     psql -U postgres -d em -f sem01_views.sql
 
@@ -17,9 +22,17 @@ BEGIN
   FOR t IN
     SELECT c.relname
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'sem01' AND c.relkind = 'v'
+  LOOP
+    EXECUTE format('DROP VIEW sem01.%I', t);
+  END LOOP;
+
+  FOR t IN
+    SELECT c.relname
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'em' AND c.relkind = 'f'
   LOOP
-    EXECUTE format('CREATE OR REPLACE VIEW sem01.%I AS SELECT * FROM em.%I', t, t);
+    EXECUTE format('CREATE VIEW sem01.%I AS SELECT * FROM em.%I', t, t);
   END LOOP;
 END $$;
 
