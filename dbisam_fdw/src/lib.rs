@@ -32,6 +32,10 @@ enum DbisamFdwError {
     Options(String),
     /// A failure from the Exportmaster protocol client.
     Protocol(String),
+    /// A requested column is absent from the DBISAM result set — the foreign
+    /// table definition doesn't match the live table. Erroring beats silently
+    /// returning NULL for every row.
+    MissingColumn { column: String, table: String },
     /// A write was attempted against this read-only FDW.
     ReadOnly,
 }
@@ -47,6 +51,10 @@ impl From<DbisamFdwError> for ErrorReport {
         let msg = match &e {
             DbisamFdwError::Options(s) => format!("dbisam_fdw option error: {s}"),
             DbisamFdwError::Protocol(s) => format!("dbisam_fdw protocol error: {s}"),
+            DbisamFdwError::MissingColumn { column, table } => format!(
+                "dbisam_fdw: column \"{column}\" is not in the DBISAM result for \
+                 table \"{table}\"; the foreign table definition is out of date"
+            ),
             DbisamFdwError::ReadOnly => {
                 "dbisam_fdw is read-only; DML is not supported".to_string()
             }
@@ -72,6 +80,10 @@ pub(crate) struct DbisamFdw {
     batch: Option<arrow::record_batch::RecordBatch>,
     row_idx: usize,
     tgt_cols: Vec<Column>,
+    /// Batch column index for each entry of `tgt_cols`, resolved once in
+    /// `begin_scan` (case-insensitively — DBISAM echoes result columns in its
+    /// own arbitrary case, which won't string-match our lowercased PG names).
+    tgt_idx: Vec<usize>,
 }
 
 impl DbisamFdw {
@@ -107,6 +119,7 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
             batch: None,
             row_idx: 0,
             tgt_cols: Vec::new(),
+            tgt_idx: Vec::new(),
         })
     }
 
@@ -133,7 +146,10 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
         // columns created manually.
         let pk = options.get("pk").map(String::as_str);
         let projection = if columns.is_empty() {
-            "*".to_string()
+            // No columns requested (e.g. `count(*)`): only the row count
+            // matters, so fetch the narrowest thing available — the PK if we
+            // know it — instead of full-width rows (incl. blob resolution).
+            pk.map_or_else(|| "*".to_string(), dbisam_sql::quote_ident)
         } else {
             let mut names: Vec<&str> = Vec::with_capacity(columns.len() + 1);
             if let Some(pk) = pk {
@@ -150,12 +166,11 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
         };
 
         // Filter: render the foldable subset; the rest is rechecked by Postgres.
+        // TOP is only safe to push when *every* qual was pushed (`all_pushed`)
+        // — a non-foldable qual rechecked above the scan would make TOP cap
+        // the wrong count (04 §"Limit edge case").
         let preds = quals::to_preds(quals);
-        let where_clause = dbisam_sql::render_where(&preds);
-        // TOP is only safe to push when *every* qual was pushed — a non-foldable
-        // qual rechecked above the scan would make TOP cap the wrong count
-        // (04 §"Limit edge case").
-        let all_pushed = preds.iter().all(|p| p.render().is_some());
+        let (where_clause, all_pushed) = dbisam_sql::render_where(&preds);
 
         let mut sql = format!("SELECT {projection} FROM {}", dbisam_sql::quote_ident(table));
         if let Some(w) = &where_clause {
@@ -165,7 +180,9 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
         if let Some(lim) = limit {
             if all_pushed {
                 // Fetch offset+count; Postgres applies the OFFSET itself.
-                let n = (lim.offset + lim.count).max(0) as u64;
+                // Floor at 1: LIMIT 0 would render `TOP 0`, which DBISAM's
+                // grammar isn't verified to accept — one row is still cheap.
+                let n = (lim.offset + lim.count).max(1) as u64;
                 sql.push(' ');
                 sql.push_str(&dbisam_sql::top_clause(n));
             }
@@ -177,6 +194,25 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
 
         let mut client = Client::connect_and_login(&self.opts)?;
         let batch = client.query_to_table(&sql)?;
+
+        // Resolve each target column to its batch index once, up front. A miss
+        // means the foreign table definition has drifted from the live DBISAM
+        // table — fail loudly here rather than emit all-NULL columns.
+        let schema = batch.schema();
+        self.tgt_idx = columns
+            .iter()
+            .map(|col| {
+                schema
+                    .fields()
+                    .iter()
+                    .position(|f| f.name().eq_ignore_ascii_case(&col.name))
+                    .ok_or_else(|| DbisamFdwError::MissingColumn {
+                        column: col.name.clone(),
+                        table: table.clone(),
+                    })
+            })
+            .collect::<DbisamFdwResult<Vec<_>>>()?;
+
         self.batch = Some(batch);
         self.row_idx = 0;
         self.tgt_cols = columns.to_vec();
@@ -192,14 +228,8 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
         }
         let r = self.row_idx;
         let schema = batch.schema();
-        for col in &self.tgt_cols {
-            // Case-insensitive: DBISAM echoes result columns in its own arbitrary
-            // case, which won't string-match our lowercased PG column names.
-            let idx = schema
-                .fields()
-                .iter()
-                .position(|f| f.name().eq_ignore_ascii_case(&col.name));
-            let cell = idx.and_then(|i| typemap::array_cell(schema.field(i), batch.column(i), r));
+        for (col, &i) in self.tgt_cols.iter().zip(&self.tgt_idx) {
+            let cell = typemap::array_cell(schema.field(i), batch.column(i), r);
             row.push(&col.name, cell);
         }
         self.row_idx += 1;
@@ -209,6 +239,7 @@ impl ForeignDataWrapper<DbisamFdwError> for DbisamFdw {
     fn end_scan(&mut self) -> DbisamFdwResult<()> {
         self.batch = None;
         self.tgt_cols.clear();
+        self.tgt_idx.clear();
         Ok(())
     }
 

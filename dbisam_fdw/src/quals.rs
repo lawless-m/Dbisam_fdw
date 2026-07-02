@@ -116,9 +116,13 @@ fn cell_to_scalar(c: &Cell) -> Option<Scalar> {
 
 /// If `pat` is a pure prefix pattern (`abc%` with no other `%`/`_` wildcards),
 /// return the literal prefix (`abc`); otherwise `None`.
+///
+/// `\` is also rejected: it's Postgres's LIKE escape character, so `abc\%`
+/// means the literal string `abc%` — pushing it as `LIKE 'abc\%'` would make
+/// DBISAM match a literal backslash instead and silently drop the right rows.
 fn like_prefix(pat: &str) -> Option<String> {
     let prefix = pat.strip_suffix('%')?;
-    if prefix.contains('%') || prefix.contains('_') {
+    if prefix.contains('%') || prefix.contains('_') || prefix.contains('\\') {
         return None;
     }
     Some(prefix.to_string())
@@ -135,5 +139,12 @@ mod tests {
         assert_eq!(like_prefix("a%c%"), None); // internal
         assert_eq!(like_prefix("a_c%"), None); // underscore wildcard
         assert_eq!(like_prefix("abc"), None); // not a LIKE prefix at all
+    }
+
+    #[test]
+    fn like_prefix_rejects_escape_sequences() {
+        assert_eq!(like_prefix("abc\\%"), None); // escaped % — means literal "abc%"
+        assert_eq!(like_prefix("abc\\%x%"), None); // escaped % mid-pattern
+        assert_eq!(like_prefix("a\\\\c%"), None); // escaped backslash — literal "a\c"
     }
 }
