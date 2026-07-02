@@ -83,9 +83,11 @@ fn downcast<T: 'static>(array: &ArrayRef) -> Option<&T> {
 
 /// PostgreSQL type name for a result column, used to emit `CREATE FOREIGN TABLE`
 /// DDL during `IMPORT FOREIGN SCHEMA`. Uses the DBISAM tag to split Memo (text)
-/// from binary blobs.
-pub fn arrow_pg_type(field: &Field) -> &'static str {
-    match field.data_type() {
+/// from binary blobs. `None` for an Arrow type we don't map — `array_cell`
+/// would only ever yield NULL for it, so the importer skips the table (with a
+/// warning) rather than fabricate an all-NULL text column.
+pub fn arrow_pg_type(field: &Field) -> Option<&'static str> {
+    Some(match field.data_type() {
         DataType::Utf8 => "text",
         DataType::Boolean => "boolean",
         DataType::Int32 => "integer",
@@ -102,6 +104,6 @@ pub fn arrow_pg_type(field: &Field) -> &'static str {
                 "bytea"
             }
         }
-        _ => "text",
-    }
+        _ => return None,
+    })
 }

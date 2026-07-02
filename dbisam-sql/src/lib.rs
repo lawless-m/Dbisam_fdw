@@ -90,12 +90,23 @@ pub enum Scalar {
 }
 
 impl Scalar {
-    /// Render as a DBISAM SQL literal. Text is single-quoted with `'` doubled.
-    fn render(&self) -> String {
-        match self {
+    /// Render as a DBISAM SQL literal, or `None` if the value has no DBISAM
+    /// literal form (the containing predicate then falls back to a local
+    /// recheck). Text is single-quoted with `'` doubled.
+    fn render(&self) -> Option<String> {
+        Some(match self {
             Scalar::Text(s) => format!("'{}'", s.replace('\'', "''")),
             Scalar::Int(n) => n.to_string(),
-            Scalar::Float(f) => f.to_string(),
+            Scalar::Float(f) => {
+                // NaN/±inf have no DBISAM literal — rendered as `NaN`/`inf`
+                // they'd be a syntax error and fail the whole query, so leave
+                // those to the local recheck. Finite floats are safe: Rust's
+                // Display always emits plain decimal, never exponent notation.
+                if !f.is_finite() {
+                    return None;
+                }
+                f.to_string()
+            }
             // DBISAM accepts TRUE/FALSE keyword literals for boolean columns.
             // TODO(dibdog): confirm vs 0/1 before widening boolean pushdown.
             Scalar::Bool(b) => if *b { "TRUE".into() } else { "FALSE".into() },
@@ -103,7 +114,7 @@ impl Scalar {
             Scalar::Timestamp { y, mo, d, h, mi, s } => {
                 format!("'{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}'")
             }
-        }
+        })
     }
 }
 
@@ -184,7 +195,7 @@ impl Pred {
     pub fn render(&self) -> Option<String> {
         match self {
             Pred::Compare { left, op, value } => {
-                let base = format!("{} {} {}", left.render(), op.sql(), value.render());
+                let base = format!("{} {} {}", left.render(), op.sql(), value.render()?);
                 // Quirk #2: `<>` lets NULL rows through on DBISAM.
                 if *op == CmpOp::Ne {
                     Some(format!("({base} AND {} IS NOT NULL)", quote_ident(left.column())))
@@ -196,7 +207,7 @@ impl Pred {
                 if values.is_empty() {
                     return None;
                 }
-                let list = values.iter().map(Scalar::render).collect::<Vec<_>>().join(", ");
+                let list = values.iter().map(Scalar::render).collect::<Option<Vec<_>>>()?.join(", ");
                 let kw = if *negated { "NOT IN" } else { "IN" };
                 let base = format!("{} {} ({})", col.render(), kw, list);
                 // Quirk #2: NOT IN includes NULLs, same as `<>`.
@@ -244,9 +255,19 @@ impl Pred {
 }
 
 /// Render a list of top-level quals (implicitly AND-ed, as Postgres hands
-/// them) into a single `WHERE` expression, or `None` if none are foldable.
-pub fn render_where(quals: &[Pred]) -> Option<String> {
-    Pred::And(quals.to_vec()).render()
+/// them) into a single `WHERE` expression — `None` if none are foldable —
+/// plus a flag saying whether *every* qual folded. The caller needs that flag
+/// to decide if `TOP` is safe to push (04 §"Limit edge case").
+pub fn render_where(quals: &[Pred]) -> (Option<String>, bool) {
+    let rendered: Vec<Option<String>> = quals.iter().map(Pred::render).collect();
+    let all_pushed = rendered.iter().all(Option::is_some);
+    let parts: Vec<String> = rendered.into_iter().flatten().collect();
+    let clause = match parts.len() {
+        0 => None,
+        1 => parts.into_iter().next(),
+        _ => Some(format!("({})", parts.join(" AND "))),
+    };
+    (clause, all_pushed)
 }
 
 /// The trailing `TOP n` clause (quirk #1). Append after the table reference:
@@ -454,9 +475,48 @@ mod tests {
             Pred::Compare { left: col("a"), op: CmpOp::Eq, value: Scalar::Int(1) },
             Pred::Compare { left: col("b"), op: CmpOp::Ne, value: Scalar::Int(2) },
         ];
-        assert_eq!(
-            render_where(&quals).unwrap(),
-            "(a = 1 AND (b <> 2 AND b IS NOT NULL))"
-        );
+        let (clause, all_pushed) = render_where(&quals);
+        assert_eq!(clause.unwrap(), "(a = 1 AND (b <> 2 AND b IS NOT NULL))");
+        assert!(all_pushed);
+    }
+
+    #[test]
+    fn render_where_reports_partial_pushdown() {
+        let quals = vec![
+            Pred::Compare { left: col("a"), op: CmpOp::Eq, value: Scalar::Int(1) },
+            Pred::Unsupported,
+        ];
+        let (clause, all_pushed) = render_where(&quals);
+        assert_eq!(clause.unwrap(), "a = 1");
+        assert!(!all_pushed);
+
+        let (clause, all_pushed) = render_where(&[]);
+        assert_eq!(clause, None);
+        assert!(all_pushed); // no quals at all — TOP is safe
+    }
+
+    #[test]
+    fn finite_floats_render_plainly() {
+        let p = Pred::Compare { left: col("f"), op: CmpOp::Gt, value: Scalar::Float(1.5) };
+        assert_eq!(p.render().unwrap(), "f > 1.5");
+        // Rust Display never emits exponent notation, so this stays a plain
+        // (if long) decimal literal rather than "1e-10".
+        let p = Pred::Compare { left: col("f"), op: CmpOp::Eq, value: Scalar::Float(1e-10) };
+        assert_eq!(p.render().unwrap(), "f = 0.0000000001");
+    }
+
+    #[test]
+    fn nonfinite_floats_are_not_pushed() {
+        for f in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let p = Pred::Compare { left: col("f"), op: CmpOp::Eq, value: Scalar::Float(f) };
+            assert_eq!(p.render(), None, "{f} must not fold");
+            // An IN list is all-or-nothing over its values too.
+            let p = Pred::In {
+                col: col("f"),
+                values: vec![Scalar::Float(1.0), Scalar::Float(f)],
+                negated: false,
+            };
+            assert_eq!(p.render(), None, "IN (…, {f}) must not fold");
+        }
     }
 }
